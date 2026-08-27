@@ -2,6 +2,8 @@ package coredevices.ring.database
 
 import com.russhwolf.settings.Settings
 import coredevices.libindex.database.BasePreferences
+import coredevices.ring.agent.DefaultCaptureType
+import coredevices.ring.agent.LlmMode
 import coredevices.ring.agent.builtin_servlets.messaging.ApprovedBeeperContact
 import coredevices.ring.agent.builtin_servlets.notes.NoteProvider
 import coredevices.ring.agent.builtin_servlets.reminders.ReminderProvider
@@ -16,7 +18,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 
 interface Preferences: BasePreferences {
-    val useCactusAgent: StateFlow<Boolean>
+    val llmMode: StateFlow<LlmMode>
     val useCactusTranscription: StateFlow<Boolean>
     val cactusMode: CactusSTTMode
     val ringPairedOld: StateFlow<Boolean>
@@ -29,7 +31,11 @@ interface Preferences: BasePreferences {
     val reminderProvider: StateFlow<ReminderProvider>
     val noteProvider: StateFlow<NoteProvider>
     val noteShortcut: StateFlow<NoteShortcutType>
+    val autoDismissActionNotifications: StateFlow<Boolean>
     val backupEnabled: StateFlow<Boolean>
+    /** Whether the user has connected the Phone Calendar integration (Accounts → Add integration).
+     *  The calendar tool stays unavailable until this is enabled AND calendar permission is granted. */
+    val phoneCalendarEnabled: StateFlow<Boolean>
     val useEncryption: StateFlow<Boolean>
     val encryptionKeyFingerprint: StateFlow<String?>
     val lastWipedRing: StateFlow<String?>
@@ -37,8 +43,10 @@ interface Preferences: BasePreferences {
      *  manual sync.
      */
     val lastBackupCount: StateFlow<Int?>
+    /** One-shot: onboarding already auto-defaulted STT to the platform engine, don't do it again. */
+    val platformSttDefaulted: Boolean
 
-    suspend fun setUseCactusAgent(useCactus: Boolean)
+    suspend fun setLlmMode(mode: LlmMode)
     suspend fun setUseCactusTranscription(useCactus: Boolean)
     fun setCactusMode(mode: CactusSTTMode)
     fun setMusicControlMode(mode: MusicControlMode)
@@ -49,17 +57,33 @@ interface Preferences: BasePreferences {
     fun setReminderProvider(provider: ReminderProvider)
     fun setNoteProvider(provider: NoteProvider)
     fun setNoteShortcut(shortcut: NoteShortcutType)
+    fun setAutoDismissActionNotifications(enabled: Boolean)
     fun setBackupEnabled(enabled: Boolean)
+    fun setPhoneCalendarEnabled(enabled: Boolean)
     fun setUseEncryption(enabled: Boolean)
     fun setEncryptionKeyFingerprint(fingerprint: String?)
     fun setLastWipedRing(id: String?)
     fun setLastBackupCount(count: Int?)
+    fun setPlatformSttDefaulted()
+
+    val defaultCaptureType: StateFlow<DefaultCaptureType>
+    fun setDefaultCaptureType(type: DefaultCaptureType)
 }
 
 class PreferencesImpl(private val settings: Settings): Preferences {
 
-    private val _useCactusAgent = MutableStateFlow(settings.getBoolean("use_cactus_agent", false))
-    override val useCactusAgent = _useCactusAgent.asStateFlow()
+    private val _llmMode = MutableStateFlow(
+        LlmMode.fromId(
+            settings.getIntOrNull("llm_mode")
+                // Migrated from the "use local LLM" switch this preference replaced.
+                ?: if (settings.getBoolean("use_cactus_agent", false)) {
+                    LlmMode.LocalOnly.id
+                } else {
+                    LlmMode.RemoteOnly.id
+                }
+        )
+    )
+    override val llmMode = _llmMode.asStateFlow()
     private val _useCactusTranscription = MutableStateFlow(settings.getBoolean("use_cactus_transcription", true))
     override val useCactusTranscription = _useCactusTranscription.asStateFlow()
     override val cactusMode get() = CactusSTTMode.fromId(settings.getInt("cactus_mode", 0))
@@ -130,8 +154,12 @@ class PreferencesImpl(private val settings: Settings): Preferences {
     private val _noteShortcut = MutableStateFlow<NoteShortcutType>(settings.getStringOrNull("note_shortcut")
         ?.let { Json.decodeFromString(it) } ?: NoteShortcutType.SendToMe)
     override val noteShortcut: StateFlow<NoteShortcutType> = _noteShortcut.asStateFlow()
+    private val _autoDismissActionNotifications = MutableStateFlow(settings.getBoolean("auto_dismiss_action_notifications", true))
+    override val autoDismissActionNotifications = _autoDismissActionNotifications.asStateFlow()
     private val _backupEnabled = MutableStateFlow(settings.getBoolean("backup_enabled", true))
     override val backupEnabled = _backupEnabled.asStateFlow()
+    private val _phoneCalendarEnabled = MutableStateFlow(settings.getBoolean("phone_calendar_enabled", false))
+    override val phoneCalendarEnabled = _phoneCalendarEnabled.asStateFlow()
     private val _useEncryption = MutableStateFlow(settings.getBoolean("use_encryption", false))
     override val useEncryption = _useEncryption.asStateFlow()
     private val _encryptionKeyFingerprint = MutableStateFlow(settings.getStringOrNull("encryption_key_fingerprint"))
@@ -142,11 +170,13 @@ class PreferencesImpl(private val settings: Settings): Preferences {
         if (settings.hasKey("last_backup_count")) settings.getInt("last_backup_count", 0) else null
     )
     override val lastBackupCount = _lastBackupCount.asStateFlow()
+    override val platformSttDefaulted: Boolean
+        get() = settings.getBoolean("platform_stt_defaulted", false)
 
-    override suspend fun setUseCactusAgent(useCactus: Boolean) {
+    override suspend fun setLlmMode(mode: LlmMode) {
         withContext(Dispatchers.IO) {
-            settings.putBoolean("use_cactus_agent", useCactus)
-            _useCactusAgent.value = useCactus
+            settings.putInt("llm_mode", mode.id)
+            _llmMode.value = mode
         }
     }
 
@@ -238,9 +268,19 @@ class PreferencesImpl(private val settings: Settings): Preferences {
         _noteShortcut.value = shortcut
     }
 
+    override fun setAutoDismissActionNotifications(enabled: Boolean) {
+        settings.putBoolean("auto_dismiss_action_notifications", enabled)
+        _autoDismissActionNotifications.value = enabled
+    }
+
     override fun setBackupEnabled(enabled: Boolean) {
         settings.putBoolean("backup_enabled", enabled)
         _backupEnabled.value = enabled
+    }
+
+    override fun setPhoneCalendarEnabled(enabled: Boolean) {
+        settings.putBoolean("phone_calendar_enabled", enabled)
+        _phoneCalendarEnabled.value = enabled
     }
 
     override fun setUseEncryption(enabled: Boolean) {
@@ -274,6 +314,22 @@ class PreferencesImpl(private val settings: Settings): Preferences {
         }
         _lastBackupCount.value = count
     }
+
+    override fun setPlatformSttDefaulted() {
+        settings.putBoolean("platform_stt_defaulted", true)
+    }
+
+    private val _defaultCaptureType = MutableStateFlow(
+        DefaultCaptureType.fromId(
+            settings.getInt("default_capture_type", DefaultCaptureType.Note.id)
+        )
+    )
+    override val defaultCaptureType = _defaultCaptureType.asStateFlow()
+
+    override fun setDefaultCaptureType(type: DefaultCaptureType) {
+        settings.putInt("default_capture_type", type.id)
+        _defaultCaptureType.value = type
+    }
 }
 
 enum class MusicControlMode(val id: Int) {
@@ -291,11 +347,11 @@ enum class MusicControlMode(val id: Int) {
 enum class SecondaryMode(val id: Int) {
     Disabled(0),
     Search(1),
+    /** No longer selectable; only ever read back to migrate to a webhook-only gesture route. */
+    IndexWebhook(2),
     McpSandbox(3);
 
     companion object {
-        // id=2 was the legacy IndexWebhook value, now controlled by the
-        // webhook trigger preference; map it to Disabled on load.
         fun fromId(id: Int): SecondaryMode {
             return entries.firstOrNull { it.id == id } ?: Disabled
         }

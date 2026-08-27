@@ -1,6 +1,10 @@
 name: Build
 
-on: [push, pull_request]
+on:
+  push:
+    branches-ignore:
+      - "dependabot/**"
+  pull_request:
 
 jobs:
   android:
@@ -15,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
       - name: Cache build deps
         uses: actions/cache@v4
         with:
@@ -25,9 +30,9 @@ jobs:
           restore-keys: |
             android-deps-${{ runner.os }}-
       - name: Use dummy google-services json
-        run: mv composeApp/src/google-services-dummy.json composeApp/src/google-services.json
+        run: mv androidApp/src/google-services-dummy.json androidApp/src/google-services.json
       - name: Build and Test
-        run: ./gradlew :composeApp:assembleDebug testDebugUnitTest jvmTest lintDebug
+        run: ./gradlew :androidApp:assembleDebug testDebugUnitTest testAndroidHostTest jvmTest lintDebug
         env:
           GITHUB_ACTOR: ${{ secrets.READ_PACKAGES_ACTOR }}
           GITHUB_TOKEN: ${{ secrets.READ_PACKAGES_TOKEN }}
@@ -60,7 +65,7 @@ jobs:
           swift --version
           sudo xcode-select --switch /Applications/Xcode_26.2.app/Contents/Developer
       - name: Use dummy google-services json
-        run: mv composeApp/src/google-services-dummy.json composeApp/src/google-services.json
+        run: mv androidApp/src/google-services-dummy.json androidApp/src/google-services.json
       - name: Build
         run: ./gradlew :composeApp:compileKotlinIosArm64 :libpebble3:linkDebugFrameworkIosArm64
         env:

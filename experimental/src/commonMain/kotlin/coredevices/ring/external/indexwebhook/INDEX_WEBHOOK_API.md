@@ -4,11 +4,14 @@ Send Index ring recording data to any HTTP endpoint.
 
 ## Setup
 
-1. In Index Settings, tap **Webhook**
-2. Enter your webhook URL
-3. Add any request headers you need (e.g. an auth header)
-4. Choose what to send: Recording only, Transcription only, or Both
-5. Set **Double click and hold** action to "Webhook"
+1. In Index 01 Settings, tap **Webhook**
+2. Pick the gesture to configure: **Hold & talk** or **Double click & hold**. Each gesture has its own endpoint, headers and payload mode
+3. Enter your webhook URL
+4. Add any request headers you need (e.g. an auth header)
+5. Choose what to send: Recording only, Transcription only, or Both
+6. Optionally tap **Send test event** to verify the endpoint, then **Save**
+
+A gesture only sends once its config is saved with a URL. The switch turns sending off without discarding the URL and headers, and the last 20 runs per gesture are listed under **Recent runs**.
 
 ## Request Format
 
@@ -17,6 +20,8 @@ POST <your webhook URL>
 Content-Type: multipart/form-data; boundary=<uuid>
 <each user-configured header>
 X-Audio-Size: <byte count>  (when audio is included)
+X-Index-Trigger: single-click-hold | double-click-hold | test-event
+X-Index-Test: true  (test events only)
 ```
 
 ## Multipart Fields
@@ -34,6 +39,10 @@ Included when payload mode is **Recording only** or **Both**.
 Included when payload mode is **Transcription only** or **Both**.
 
 - Plain text transcription of the recording
+
+### `test` (test events only)
+
+Set to `"true"` for payloads sent by **Send test event**, so they cannot be mistaken for a recording. Test events carry no `audio` part and a fixed `transcription`.
 
 ### `recordedAt` (always)
 
@@ -57,7 +66,9 @@ Headers are fully user-configurable in the webhook settings — add as many name
 
 `X-Audio-Size` is still added automatically when audio is included (it carries the audio byte count) and cannot be overridden.
 
-> Migration note: users who previously configured an auth token have it automatically carried over as an `X-Widget-Token` header, preserving existing behaviour.
+`X-Index-Trigger` is added automatically to identify the gesture that started the recording — `single-click-hold`, `double-click-hold`, or `test-event` for a manually sent test. The gesture is persisted with the processing task and preserved when a failed recording is retried. Recordings with no known gesture do not fire a webhook at all. Neither `X-Index-Trigger` nor `X-Index-Test` can be overridden by a user-configured header.
+
+> Migration note: a previously configured single webhook is copied to both recording gestures, and an auth token configured before headers were user-settable is carried over as an `X-Widget-Token` header.
 
 ## Authentication
 
@@ -79,6 +90,7 @@ def receive():
     audio = request.files.get('audio')
     transcription = request.form.get('transcription')
     recorded_at = request.form.get('recordedAt')
+    trigger = request.headers.get('X-Index-Trigger')
 
     if audio:
         audio.save(f'/tmp/{audio.filename}')
@@ -88,6 +100,7 @@ def receive():
         print(f'Transcription: {transcription}')
 
     print(f'Recorded at: {recorded_at}')
+    print(f'Trigger: {trigger}')
     return 'OK', 200
 ```
 

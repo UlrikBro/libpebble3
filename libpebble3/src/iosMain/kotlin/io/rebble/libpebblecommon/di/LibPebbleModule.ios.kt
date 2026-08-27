@@ -23,6 +23,8 @@ import io.rebble.libpebblecommon.io.rebble.libpebblecommon.contacts.IosSystemCon
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.music.IosSystemMusicControl
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.util.IosSystemGeolocation
 import io.rebble.libpebblecommon.io.rebble.libpebblecommon.util.OtherPebbleIosApps
+import io.rebble.libpebblecommon.imaging.NoNotificationImages
+import io.rebble.libpebblecommon.imaging.NotificationImageProvider
 import io.rebble.libpebblecommon.music.SystemMusicControl
 import io.rebble.libpebblecommon.notification.NotificationAppsSync
 import io.rebble.libpebblecommon.notification.NotificationListenerConnection
@@ -33,6 +35,7 @@ import org.koin.core.module.Module
 import org.koin.core.module.dsl.singleOf
 import org.koin.dsl.bind
 import org.koin.dsl.module
+import kotlin.time.Duration.Companion.seconds
 
 actual val platformModule: Module = module {
     single {
@@ -54,6 +57,7 @@ actual val platformModule: Module = module {
     singleOf(::IosCalendarActionHandler) bind PlatformCalendarActionHandler::class
     singleOf(::IosSystemCallLog) bind SystemCallLog::class
     singleOf(::IosSystemMusicControl) bind SystemMusicControl::class
+    singleOf(::NoNotificationImages) bind NotificationImageProvider::class
     singleOf(::IosSystemGeolocation) bind SystemGeolocation::class
     singleOf(::OtherPebbleIosApps) bind OtherPebbleApps::class
     singleOf(::IosSystemContacts) bind SystemContacts::class
@@ -68,6 +72,7 @@ actual val platformModule: Module = module {
         closeGattServerWhenBtDisabled = false,
         delayBleConnectionsAfterAppStart = true,
         supportsPpogResetCharacteristic = true,
+        writeWithoutResponseStallTimeout = 5.seconds,
     ) }
     singleOf(::IosClassicScanner) bind ClassicScanner::class
 }

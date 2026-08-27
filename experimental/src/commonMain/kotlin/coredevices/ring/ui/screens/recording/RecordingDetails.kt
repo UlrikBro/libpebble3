@@ -71,6 +71,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -86,11 +87,11 @@ import coredevices.indexai.data.entity.RecordingEntryEntity
 import coredevices.indexai.data.entity.RecordingEntryStatus
 import coredevices.indexai.data.entity.ItemDocument.ItemMetadata
 import coredevices.mcp.data.SemanticResult
+import coredevices.ring.util.openSystemCalendarAt
 import coredevices.ring.ui.components.chat.actionText
 import coredevices.ring.ui.openSystemClockApp
 import coredevices.ring.ui.components.recording.RecordingTraceTimeline
 import coredevices.ring.ui.theme.IndexTheme
-import coredevices.ring.ui.theme.IndexThemeHost
 import coredevices.ring.ui.viewmodel.MessagePlaybackState
 import coredevices.ring.ui.viewmodel.RecordingDetailsViewModel
 import coredevices.util.rememberUiContext
@@ -100,6 +101,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.launch
 import kotlin.time.Instant
 import org.jetbrains.compose.resources.stringResource
 import org.koin.compose.viewmodel.koinViewModel
@@ -110,6 +112,7 @@ import coreapp.util.generated.resources.Res as UtilRes
 fun RecordingDetails(id: Long, coreNav: CoreNav) {
     Firebase.crashlytics.setCustomKey("recording_details_recording_id", id)
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
     val uiContext = rememberUiContext()
     if (uiContext == null) {
         Logger.e("RecordingDetails") { "uiContext is null" }
@@ -126,132 +129,131 @@ fun RecordingDetails(id: Long, coreNav: CoreNav) {
     val allLists by viewModel.allLists.collectAsState()
     val durationSec by viewModel.durationSeconds.collectAsState()
 
-    IndexThemeHost {
-        val indexColors = IndexTheme.colors
-        val statusBarPad = WindowInsets.statusBars.asPaddingValues()
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            containerColor = indexColors.surface,
-            modifier = Modifier.padding(top = statusBarPad.calculateTopPadding()),
-            topBar = {
-                androidx.compose.foundation.layout.Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(indexColors.surface)
-                        .padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = coreNav::goBack) {
+    val indexColors = IndexTheme.colors
+    val statusBarPad = WindowInsets.statusBars.asPaddingValues()
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        containerColor = indexColors.surface,
+        modifier = Modifier.padding(top = statusBarPad.calculateTopPadding()),
+        topBar = {
+            androidx.compose.foundation.layout.Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(indexColors.surface)
+                    .padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = coreNav::goBack) {
+                    Icon(
+                        Icons.AutoMirrored.Default.ArrowBack,
+                        contentDescription = stringResource(UtilRes.string.back),
+                        tint = indexColors.onSurface,
+                    )
+                }
+                Text(
+                    // Prototype shows the recording's date/time as the
+                    // title, not the AI-generated assistantTitle.
+                    (itemState as? RecordingDetailsViewModel.ItemState.Loaded)?.recording?.localTimestamp
+                        ?.let { formatRecordingTitle(it) }
+                        ?: "Index Recording",
+                    color = indexColors.onSurface,
+                    fontSize = 16.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                )
+                BugReportButton(
+                    coreNav,
+                    pebble = false,
+                    screenContext = mapOf(
+                        "screen" to "RecordingDetails",
+                        "transcriptionModel" to ((itemState as? RecordingDetailsViewModel.ItemState.Loaded)?.entries?.firstOrNull()?.transcribedUsingModel ?: "<unknown>"),
+                        "state" to itemState.toString(),
+                        "recordingId" to id.toString(),
+                    ),
+                    recordingPath = (viewModel.itemState.value as? RecordingDetailsViewModel.ItemState.Loaded)
+                        ?.entries?.firstOrNull()?.fileName,
+                )
+                // Box anchors the DropdownMenu to the icon's bounds so
+                // the menu opens directly below the dots — without
+                // wrapping, the menu anchors to the right-slot start
+                // and renders on the left side of the screen
+                // (May 8 fix, mirrors ObjectItemDetail / ObjectListDetail).
+                Box {
+                    IconButton(onClick = viewModel::toggleMoreMenu) {
                         Icon(
-                            Icons.AutoMirrored.Default.ArrowBack,
-                            contentDescription = stringResource(UtilRes.string.back),
-                            tint = indexColors.onSurface,
+                            Icons.Default.MoreVert,
+                            contentDescription = stringResource(Res.string.more_options),
+                            tint = indexColors.onSurfaceVariant,
                         )
                     }
-                    Text(
-                        // Prototype shows the recording's date/time as the
-                        // title, not the AI-generated assistantTitle.
-                        (itemState as? RecordingDetailsViewModel.ItemState.Loaded)?.recording?.localTimestamp
-                            ?.let { formatRecordingTitle(it) }
-                            ?: "Index Recording",
-                        color = indexColors.onSurface,
-                        fontSize = 16.sp,
-                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                    )
-                    BugReportButton(
-                        coreNav,
-                        pebble = false,
-                        screenContext = mapOf(
-                            "screen" to "RecordingDetails",
-                            "transcriptionModel" to ((itemState as? RecordingDetailsViewModel.ItemState.Loaded)?.entries?.firstOrNull()?.transcribedUsingModel ?: "<unknown>"),
-                            "state" to itemState.toString(),
-                            "recordingId" to id.toString(),
-                        ),
-                        recordingPath = (viewModel.itemState.value as? RecordingDetailsViewModel.ItemState.Loaded)
-                            ?.entries?.firstOrNull()?.fileName,
-                    )
-                    // Box anchors the DropdownMenu to the icon's bounds so
-                    // the menu opens directly below the dots — without
-                    // wrapping, the menu anchors to the right-slot start
-                    // and renders on the left side of the screen
-                    // (May 8 fix, mirrors ObjectItemDetail / ObjectListDetail).
-                    Box {
-                        IconButton(onClick = viewModel::toggleMoreMenu) {
-                            Icon(
-                                Icons.Default.MoreVert,
-                                contentDescription = stringResource(Res.string.more_options),
-                                tint = indexColors.onSurfaceVariant,
+                    DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = viewModel::dismissMoreMenu) {
+                        DropdownMenuItem(
+                            text = { Text(stringResource(Res.string.export_recording)) },
+                            onClick = { viewModel.exportRecording(); viewModel.dismissMoreMenu() },
+                        )
+                        // Re-run the agent ingestion against this recording.
+                        // Always available — moving it out of the debug-only
+                        // block so the user can recover from a failed
+                        // ingestion or pick up new agent behaviour without
+                        // toggling debug mode.
+                        if (showDebugDetails) {
+                            DropdownMenuItem(
+                                text = { Text(if (showTraceTimeline) "Hide Trace Timeline" else "Show Trace Timeline") },
+                                onClick = { viewModel.toggleTraceTimeline(); viewModel.dismissMoreMenu() },
                             )
                         }
-                        DropdownMenu(expanded = moreMenuExpanded, onDismissRequest = viewModel::dismissMoreMenu) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(Res.string.export_recording)) },
-                                onClick = { viewModel.exportRecording(); viewModel.dismissMoreMenu() },
-                            )
-                            // Re-run the agent ingestion against this recording.
-                            // Always available — moving it out of the debug-only
-                            // block so the user can recover from a failed
-                            // ingestion or pick up new agent behaviour without
-                            // toggling debug mode.
-                            if (showDebugDetails) {
-                                DropdownMenuItem(
-                                    text = { Text(if (showTraceTimeline) "Hide Trace Timeline" else "Show Trace Timeline") },
-                                    onClick = { viewModel.toggleTraceTimeline(); viewModel.dismissMoreMenu() },
-                                )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Delete recording", color = indexColors.error) },
-                                onClick = { viewModel.dismissMoreMenu(); viewModel.requestDelete() },
-                            )
-                        }
-                    }
-                }
-            },
-        ) { insets ->
-            Box(
-                modifier = Modifier.padding(insets).fillMaxSize().background(indexColors.surface),
-            ) {
-                when (val state = itemState) {
-                    is RecordingDetailsViewModel.ItemState.Loading -> {
-                        CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-                    }
-                    is RecordingDetailsViewModel.ItemState.Error -> {
-                        Text("Error loading recording", color = indexColors.onSurfaceVariant, modifier = Modifier.align(Alignment.Center))
-                    }
-                    is RecordingDetailsViewModel.ItemState.Loaded -> {
-                        RecordingDetailsContents(
-                            recording = state.recording,
-                            messages = state.messages,
-                            entries = state.entries,
-                            linkedItems = linkedItems,
-                            allLists = allLists,
-                            durationSec = durationSec,
-                            playbackState = playbackState,
-                            togglePlayback = viewModel::togglePlayback,
-                            showDebugDetails = showDebugDetails,
-                            showTraceTimeline = showTraceTimeline,
-                            onRetry = viewModel::retryRecording,
-                            onOpenObject = { id ->
-                                coreNav.navigateTo(coredevices.ring.ui.navigation.RingRoutes.ObjectDetails(id))
-                            },
+                        DropdownMenuItem(
+                            text = { Text("Delete recording", color = indexColors.error) },
+                            onClick = { viewModel.dismissMoreMenu(); viewModel.requestDelete() },
                         )
                     }
                 }
             }
+        },
+    ) { insets ->
+        Box(
+            modifier = Modifier.padding(insets).fillMaxSize().background(indexColors.surface),
+        ) {
+            when (val state = itemState) {
+                is RecordingDetailsViewModel.ItemState.Loading -> {
+                    CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                }
+                is RecordingDetailsViewModel.ItemState.Error -> {
+                    Text("Error loading recording", color = indexColors.onSurfaceVariant, modifier = Modifier.align(Alignment.Center))
+                }
+                is RecordingDetailsViewModel.ItemState.Loaded -> {
+                    RecordingDetailsContents(
+                        recording = state.recording,
+                        messages = state.messages,
+                        entries = state.entries,
+                        linkedItems = linkedItems,
+                        allLists = allLists,
+                        durationSec = durationSec,
+                        playbackState = playbackState,
+                        togglePlayback = viewModel::togglePlayback,
+                        showDebugDetails = showDebugDetails,
+                        showTraceTimeline = showTraceTimeline,
+                        onRetry = viewModel::retryRecording,
+                        onOpenObject = { id ->
+                            coreNav.navigateTo(coredevices.ring.ui.navigation.RingRoutes.ObjectDetails(id))
+                        },
+                        onCopied = { scope.launch { snackbarHostState.showSnackbar("Copied to clipboard") } },
+                    )
+                }
+            }
         }
-        if (showDeleteDialog) {
-            DeleteRecordingDialog(
-                linkedItemCount = linkedItems.size,
-                onDismiss = viewModel::dismissDeleteDialog,
-                onDeleteRecordingOnly = {
-                    viewModel.deleteRecording(alsoDeleteItems = false) { coreNav.goBack() }
-                },
-                onDeleteRecordingAndItems = {
-                    viewModel.deleteRecording(alsoDeleteItems = true) { coreNav.goBack() }
-                },
-            )
-        }
+    }
+    if (showDeleteDialog) {
+        DeleteRecordingDialog(
+            linkedItemCount = linkedItems.size,
+            onDismiss = viewModel::dismissDeleteDialog,
+            onDeleteRecordingOnly = {
+                viewModel.deleteRecording(alsoDeleteItems = false) { coreNav.goBack() }
+            },
+            onDeleteRecordingAndItems = {
+                viewModel.deleteRecording(alsoDeleteItems = true) { coreNav.goBack() }
+            },
+        )
     }
     Firebase.crashlytics.setCustomKey("recording_details_recording_id", 0)
 }
@@ -353,6 +355,7 @@ private fun RecordingDetailsContents(
     showTraceTimeline: Boolean,
     onRetry: () -> Unit,
     onOpenObject: (String) -> Unit,
+    onCopied: () -> Unit,
 ) {
     val transcription = entries.firstOrNull()?.transcription.orEmpty()
     val firstEntry = entries.firstOrNull()
@@ -416,6 +419,7 @@ private fun RecordingDetailsContents(
                     toolResultsByCallId = toolResultsByCallId,
                     allLists = allLists,
                     onOpenObject = onOpenObject,
+                    onCopied = onCopied,
                 )
             }
         } else if (transcription.isNotBlank()) {
@@ -423,7 +427,7 @@ private fun RecordingDetailsContents(
             // persisted: show the raw transcription as the user bubble.
             item("bubble") {
                 Spacer(Modifier.height(16.dp))
-                TranscriptionBubble(transcription)
+                TranscriptionBubble(transcription, onCopied)
             }
         }
 
@@ -444,6 +448,7 @@ private fun RecordingDetailsContents(
                     items = trailingItems,
                     allLists = allLists,
                     onOpenObject = onOpenObject,
+                    onCopied = onCopied,
                 )
             }
         }
@@ -570,7 +575,7 @@ private fun WaveformBars(
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun TranscriptionBubble(text: String) {
+private fun TranscriptionBubble(text: String, onCopied: () -> Unit) {
     val colors = IndexTheme.colors
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
     val haptics = androidx.compose.ui.platform.LocalHapticFeedback.current
@@ -583,15 +588,12 @@ private fun TranscriptionBubble(text: String) {
                 .foundationFillMaxWidth(0.85f)
                 .clip(RoundedCornerShape(20.dp, 20.dp, 5.dp, 20.dp))
                 .background(colors.primary)
-                // Long-press copies the transcription to the clipboard.
-                // We can't surface a snackbar here without threading the
-                // SnackbarHostState through, so the haptic doubles as
-                // the visual ack — same UX as iOS Notes.
                 .combinedClickable(
                     onClick = {},
                     onLongClick = {
                         clipboard.setText(androidx.compose.ui.text.AnnotatedString(text))
                         haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                        onCopied()
                     },
                 )
                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -616,6 +618,7 @@ private fun ConversationMessage(
     toolResultsByCallId: Map<String, SemanticResult>,
     allLists: List<coredevices.ring.data.entity.room.indexfeed.CachedList>,
     onOpenObject: (String) -> Unit,
+    onCopied: () -> Unit,
 ) {
     val doc = message.document
     when (doc.role) {
@@ -623,7 +626,7 @@ private fun ConversationMessage(
             val text = doc.content?.trim().orEmpty()
             if (text.isNotBlank()) {
                 Spacer(Modifier.height(16.dp))
-                TranscriptionBubble(text)
+                TranscriptionBubble(text, onCopied)
             }
         }
         MessageRole.assistant -> {
@@ -638,6 +641,7 @@ private fun ConversationMessage(
                     toolResultsByCallId = toolResultsByCallId,
                     allLists = allLists,
                     onOpenObject = onOpenObject,
+                    onCopied = onCopied,
                 )
             }
         }
@@ -655,6 +659,7 @@ private fun AssistantTurn(
     toolResultsByCallId: Map<String, SemanticResult>,
     allLists: List<coredevices.ring.data.entity.room.indexfeed.CachedList>,
     onOpenObject: (String) -> Unit,
+    onCopied: () -> Unit,
 ) {
     // Don't render empty assistant turns
     when {
@@ -687,12 +692,12 @@ private fun AssistantTurn(
             modifier = Modifier.foundationFillMaxWidth(0.85f),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            if (replyText.isNotBlank()) ReplyBubble(replyText)
-            answerItems.forEach { ReplyBubble(it.body) }
+            if (replyText.isNotBlank()) ReplyBubble(replyText, onCopied)
+            answerItems.forEach { ReplyBubble(it.body, onCopied) }
             if (chipCalls.isNotEmpty()) {
                 chipCalls.map { toolResultsByCallId[it.id] }.filterIsInstance<SemanticResult.GenericFailure>().forEach { result ->
                     result.userErrorMessage?.let {
-                        ReplyBubble(it)
+                        ReplyBubble(it, onCopied)
                     }
                 }
                 FlowRow(
@@ -722,6 +727,13 @@ private fun AssistantTurn(
                                     }
                                 }),
                             )
+                            // Calendar events live only in the phone calendar (no feed item):
+                            // the chip deep-links to the system calendar at the event's time.
+                            result is SemanticResult.CalendarEventCreation -> ActionChip(
+                                glyph = "📅",
+                                label = resultActionText ?: "Added to calendar",
+                                onClick = { openSystemCalendarAt(result.startTime) },
+                            )
                             // Otherwise collapse the call + its result into one
                             // chip showing the result.
                             resultActionText != null -> ActionChip(
@@ -746,7 +758,7 @@ private fun AssistantTurn(
 /** Index reply bubble (left-aligned, rounded). Long-press copies the text. */
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ReplyBubble(text: String) {
+private fun ReplyBubble(text: String, onCopied: () -> Unit) {
     val sanitized = text.replace(Regex("<[^>]*>"), "").trim()
     val colors = IndexTheme.colors
     val clipboard = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -760,6 +772,7 @@ private fun ReplyBubble(text: String) {
                 onLongClick = {
                     clipboard.setText(androidx.compose.ui.text.AnnotatedString(sanitized))
                     haptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.LongPress)
+                    onCopied()
                 },
             )
             .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -843,6 +856,7 @@ private fun TrailingItemChips(
     items: List<coredevices.ring.data.entity.room.indexfeed.CachedItem>,
     allLists: List<coredevices.ring.data.entity.room.indexfeed.CachedList>,
     onOpenObject: (String) -> Unit,
+    onCopied: () -> Unit,
 ) {
     val colors = IndexTheme.colors
     Row(
@@ -867,7 +881,7 @@ private fun TrailingItemChips(
             modifier = Modifier.foundationFillMaxWidth(0.85f),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            answerItems.forEach { ReplyBubble(it.body) }
+            answerItems.forEach { ReplyBubble(it.body, onCopied) }
             if (chipItems.isNotEmpty()) {
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),

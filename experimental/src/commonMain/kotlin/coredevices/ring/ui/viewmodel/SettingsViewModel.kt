@@ -7,20 +7,21 @@ import co.touchlab.kermit.Logger
 import coredevices.indexai.data.entity.ConversationMessageEntity
 import coredevices.indexai.data.entity.RecordingDocument
 import coredevices.indexai.data.entity.RecordingEntryEntity
+import coredevices.indexai.data.entity.mcp_sandbox.SandboxModelType
 import coredevices.indexai.database.dao.ConversationMessageDao
 import coredevices.indexai.database.dao.RecordingEntryDao
 import coredevices.libindex.device.IndexDeviceManager
 import coredevices.libindex.device.InterviewedIndexDevice
 import coredevices.libindex.device.KnownIndexDevice
 import coredevices.libindex.di.LibIndexCoroutineScope
+import coredevices.ring.agent.IndexActionsRepository
+import coredevices.ring.agent.LlmMode
 import coredevices.ring.agent.builtin_servlets.notes.NoteIntegrationFactory
 import coredevices.ring.agent.builtin_servlets.notes.NoteProvider
 import coredevices.ring.agent.builtin_servlets.reminders.ReminderProvider
 import coredevices.ring.agent.integrations.GTasksIntegration
 import coredevices.ring.data.NoteShortcutType
-import coredevices.ring.database.MusicControlMode
 import coredevices.ring.database.Preferences
-import coredevices.ring.database.SecondaryMode
 import coredevices.ring.database.firestore.dao.FirestoreRecordingsDao
 import coredevices.ring.database.room.repository.McpSandboxRepository
 import coredevices.ring.database.room.repository.RecordingRepository
@@ -34,6 +35,9 @@ import coredevices.ring.encryption.TamperedException
 import coredevices.ring.RingDelegate
 import coredevices.ring.model.CactusModelProvider
 import coredevices.ring.service.RingSync
+import coredevices.ring.service.button.GestureDestination
+import coredevices.ring.service.button.GestureRoutingPreferences
+import coredevices.ring.service.button.RingGesture
 import coredevices.ring.storage.BackupZipReader
 import coredevices.ring.ui.components.QrPhotoPickResult
 import coredevices.ring.ui.components.pickQrCodeFromPhotos
@@ -56,7 +60,6 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
@@ -106,6 +109,8 @@ class SettingsViewModel(
     private val ringDelegate: RingDelegate,
     private val cactusModelProvider: CactusModelProvider,
     private val appScope: LibIndexCoroutineScope,
+    private val gestureRouting: GestureRoutingPreferences,
+    private val indexActionsRepository: IndexActionsRepository,
 ): ViewModel() {
     val version = CommonBuildKonfig.GIT_HASH
     val username = Firebase.auth.authStateChanged
@@ -114,34 +119,48 @@ class SettingsViewModel(
     val userId = Firebase.auth.authStateChanged
         .map { it?.uid }
         .stateIn(viewModelScope, SharingStarted.Lazily, Firebase.auth.currentUser?.uid)
-    private val _useCactusAgent = MutableStateFlow(false)
-    val useCactusAgent = _useCactusAgent.asStateFlow()
+    val llmMode = preferences.llmMode
+
+    /** The on-device agent can't drive a sandbox group's model, so the local LLM modes are
+     *  only offered while the default group runs the Index Agent. */
+    val localLlmSupported = mcpSandboxRepository.getDefaultGroupFlow()
+        .map { it?.modelType == SandboxModelType.IndexAgent }
+        .stateIn(
+            viewModelScope,
+            started = SharingStarted.Lazily,
+            initialValue = preferences.llmMode.value.usesLocalCactus()
+        )
     private val _showModelDownloadDialog = MutableStateFlow<ModelType?>(null)
     val showModelDownloadDialog = _showModelDownloadDialog.asStateFlow()
-    private val _showMusicControlDialog = MutableStateFlow(false)
-    val showMusicControlDialog = _showMusicControlDialog.asStateFlow()
-    val musicControlMode = preferences.musicControlMode
+    val gestureRoutes = gestureRouting.routes
     val debugDetailsEnabled = preferences.debugDetailsEnabled
     private val _showContactsDialog = MutableStateFlow(false)
     val showContactsDialog = _showContactsDialog.asStateFlow()
-    private val _showSecondaryModeDialog = MutableStateFlow(false)
-    val showSecondaryModeDialog = _showSecondaryModeDialog.asStateFlow()
-    val secondaryMode = preferences.secondaryMode
-    val secondaryModeMcpGroupId = preferences.secondaryModeMcpGroupId
     val sandboxGroups = mcpSandboxRepository.getAllGroupsFlow().stateIn(
         viewModelScope,
         started = SharingStarted.Lazily,
         initialValue = emptyList()
     )
+
+    // Eager so the list is loaded before the section is lazily scrolled into view.
+    val indexActions = indexActionsRepository.actions.stateIn(
+        viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = emptyList()
+    )
+    val httpMcpDisabledReason = indexActionsRepository.httpMcpDisabledReason.stateIn(
+        viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = null
+    )
     private val _showNoteShortcutDialog = MutableStateFlow(false)
     val showNoteShortcutDialog = _showNoteShortcutDialog.asStateFlow()
     val noteShortcut = preferences.noteShortcut
+    val autoDismissActionNotifications = preferences.autoDismissActionNotifications
     private val currentRing = indexDeviceManager.rings.map {
         it.firstOrNull { ring -> ring is KnownIndexDevice }
     }
     val ringPaired = preferences.ringPaired
-    private val _panicPending = MutableStateFlow(false)
-    val panicPending = _panicPending.asStateFlow()
     val currentRingFirmware = currentRing
         .mapNotNull { (it as? InterviewedIndexDevice)?.firmwareVersion }
         .stateIn(
@@ -165,10 +184,16 @@ class SettingsViewModel(
 
     init {
         viewModelScope.launch {
-            preferences.useCactusAgent.collectLatest { useCactus ->
-                _useCactusAgent.value = useCactus
-            }
+            updateAvailableNoteProviders()
+            updateAvailableReminderProviders()
         }
+    }
+
+    fun setActionEnabled(name: String, enabled: Boolean) {
+        viewModelScope.launch { indexActionsRepository.setActionEnabled(name, enabled) }
+    }
+
+    fun refreshAvailableProviders() {
         viewModelScope.launch {
             updateAvailableNoteProviders()
             updateAvailableReminderProviders()
@@ -205,49 +230,28 @@ class SettingsViewModel(
         // appScope: pref write must land even if the user leaves Settings.
         appScope.launch {
             when (wasDownloading) {
-                is ModelType.Agent -> preferences.setUseCactusAgent(success)
+                is ModelType.Agent -> if (!success) preferences.setLlmMode(LlmMode.RemoteOnly)
                 is ModelType.STT -> preferences.setUseCactusTranscription(success)
             }
         }
     }
 
-    fun toggleCactusAgent() {
+    fun setLlmMode(mode: LlmMode) {
         appScope.launch {
-            if (!_useCactusAgent.value) {
+            if (mode.usesLocalCactus()) {
                 // Trigger LM model extraction, should be already integrated into assets so no DL
                 cactusModelProvider.getLMModelPath()
-                preferences.setUseCactusAgent(true)
-            } else {
-                preferences.setUseCactusAgent(false)
             }
+            preferences.setLlmMode(mode)
         }
     }
 
-    fun showMusicControlDialog() {
-        _showMusicControlDialog.value = true
+    fun setGestureRoute(gesture: RingGesture, destination: GestureDestination) {
+        gestureRouting.setRoute(gesture, destination)
     }
 
-    fun closeMusicControlDialog() {
-        _showMusicControlDialog.value = false
-    }
-
-    fun setMusicControlMode(mode: MusicControlMode) {
-        preferences.setMusicControlMode(mode)
-    }
-
-    fun showSecondaryModeDialog() {
-        _showSecondaryModeDialog.value = true
-    }
-
-    fun closeSecondaryModeDialog() {
-        _showSecondaryModeDialog.value = false
-    }
-
-    fun setSecondaryMode(mode: SecondaryMode, mcpSandboxGroupId: Long? = null) {
-        preferences.setSecondaryMode(mode)
-        if (mode == SecondaryMode.McpSandbox) {
-            preferences.setSecondaryModeMcpGroupId(mcpSandboxGroupId)
-        }
+    fun setGestureRoutes(routes: Map<RingGesture, GestureDestination>) {
+        gestureRouting.setRoutes(routes)
     }
 
     fun toggleDebugDetailsEnabled() {
@@ -255,6 +259,10 @@ class SettingsViewModel(
             val newValue = !debugDetailsEnabled.value
             preferences.setDebugDetailsEnabled(newValue)
         }
+    }
+
+    fun toggleAutoDismissActionNotifications() {
+        preferences.setAutoDismissActionNotifications(!autoDismissActionNotifications.value)
     }
 
     fun showNoteShortcutDialog() {
@@ -285,20 +293,6 @@ class SettingsViewModel(
     val syncingFeedHistory = _syncingFeedHistory.asStateFlow()
     private val _syncStatus = MutableStateFlow<String?>(null)
     val syncStatus = _syncStatus.asStateFlow()
-
-
-    fun panicRing() {
-        _panicPending.value = true
-        viewModelScope.launch {
-            try {
-                ringSync.lastRing.value?.panic()
-            } catch (e: Exception) {
-                Logger.withTag("Settings").e(e) { "Failed to panic ring: ${e.message}" }
-            } finally {
-                _panicPending.value = false
-            }
-        }
-    }
 
     fun restartPreemptiveTransfer() {
         ringDelegate.restartPreemptiveTransfer()
@@ -391,7 +385,7 @@ class SettingsViewModel(
                 val count = withContext(Dispatchers.IO) {
                     firestoreRecordingsDao.getCount()
                 }
-                preferences.setLastBackupCount(count)
+                preferences.setLastBackupCount(count.toInt())
             } catch (e: Exception) {
                 Logger.withTag("Backup").w(e) { "Failed to refresh backup count" }
                 // Don't surface as an error in the UI — the cached value

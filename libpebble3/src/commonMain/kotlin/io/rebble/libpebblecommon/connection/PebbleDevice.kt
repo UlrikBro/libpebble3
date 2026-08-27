@@ -3,6 +3,7 @@ package io.rebble.libpebblecommon.connection
 import androidx.compose.runtime.Stable
 import androidx.compose.ui.graphics.ImageBitmap
 import io.rebble.libpebblecommon.connection.bt.ble.pebble.PebbleLeScanRecord
+import io.rebble.libpebblecommon.connection.bt.ble.pebble.ReversePpogVersion
 import io.rebble.libpebblecommon.connection.endpointmanager.FirmwareUpdater
 import io.rebble.libpebblecommon.connection.endpointmanager.InstalledLanguagePack
 import io.rebble.libpebblecommon.connection.endpointmanager.LanguagePackInstallState
@@ -28,6 +29,7 @@ import kotlin.uuid.Uuid
 interface ActiveDevice {
     fun disconnect()
     val usingBtClassic: Boolean
+    val reversePpogVersion: ReversePpogVersion?
 }
 
 data class ConnectionFailureInfo(
@@ -139,7 +141,8 @@ object ConnectedPebble {
     }
 
     interface DevConnection {
-        suspend fun startDevConnection()
+        /** [forceLan] ignores the lanDevConnection config and always uses the LAN server. */
+        suspend fun startDevConnection(forceLan: Boolean = false)
         suspend fun stopDevConnection()
         val devConnectionActive: StateFlow<Boolean>
     }
@@ -207,7 +210,8 @@ object ConnectedPebble {
             trackPosMs: UInt,
             playbackRatePct: UInt,
             shuffle: Boolean,
-            repeatType: RepeatType
+            repeatType: RepeatType,
+            skipSeeksWithinTrack: Boolean,
         )
         suspend fun updatePlayerInfo(packageId: String, name: String)
         suspend fun updateVolumeInfo(volumePercent: UByte)

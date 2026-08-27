@@ -3,6 +3,7 @@ package coredevices.ring.agent
 import co.touchlab.kermit.Logger
 import com.cactus.cactusComplete
 import com.cactus.cactusInit
+import com.cactus.cactusSetBackend
 import com.cactus.isCactusSupported
 import coredevices.indexai.agent.AgentToolCall
 import coredevices.indexai.agent.ToolCallingAgent
@@ -13,7 +14,6 @@ import coredevices.indexai.data.entity.ToolCall
 import coredevices.mcp.SessionContext
 import coredevices.mcp.client.McpSession
 import coredevices.mcp.client.McpSessionTool
-import coredevices.ring.agent.builtin_servlets.calendar.CalendarServlet
 import coredevices.ring.model.CactusModelProvider
 import coredevices.ring.transcription.InferenceBoostProvider
 import coredevices.util.CoreConfigFlow
@@ -55,6 +55,7 @@ class IndexAgentCactus(
                 logger.d { "Initializing CactusAgent for the first time..." }
                 val initStart = Clock.System.now()
                 val modelPath = modelProvider.getLMModelPath()
+                cactusSetBackend("cpu")
                 modelHandle = cactusInit(modelPath, null, false)
                 val initDuration = Clock.System.now() - initStart
                 logger.i { "CactusAgent model initialized: $modelPath in $initDuration" }
@@ -69,10 +70,7 @@ class IndexAgentCactus(
     // runs inference on the secondary part, regardless of how the tool is named.
     private fun prepareTools(tools: List<McpSessionTool>): CactusTools {
         val parentMap = mutableMapOf<String, String>()
-        // TODO(RING-84): the local Cactus model isn't trained on the calendar tool yet, so it is
-        //  only exposed via the online Nenya agent for now. Remove this filter once the on-device
-        //  model supports calendar event creation.
-        val tools = tools.filterNot { it.integrationName == CalendarServlet.NAME }
+        val tools = tools.filterNot { it.integrationName in LOCAL_MODEL_UNSUPPORTED_SERVLETS }
         val toolsJson = buildJsonArray {
             tools.forEach { (parentName, tool) ->
                 val definition = tool.definition

@@ -2,6 +2,8 @@ package coredevices.ring.ui.navigation
 
 import CoreNav
 import CoreRoute
+import androidx.compose.runtime.Composable
+import androidx.navigation.NavBackStackEntry
 import androidx.navigation.NavDeepLink
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
@@ -20,6 +22,7 @@ import kotlinx.serialization.Serializable
 import coredevices.ring.ui.screens.RingSyncInspectorScreen
 import coredevices.ring.ui.screens.settings.AddIntegration
 import coredevices.ring.ui.screens.settings.mcp.McpSandboxGroups
+import coredevices.ring.ui.theme.IndexThemeHost
 
 /** Marker for routes that belong to the Index/Ring feature. The
  *  WatchHomeScreen registers these in its inner NavHost too so they
@@ -67,27 +70,42 @@ object RingRoutes {
     const val OBJECT_DEEP_LINK_ID_PARAM = "id"
     fun objectDeepLink(objectId: String) =
         "pebblecore://$OBJECT_DEEP_LINK_HOST/$OBJECT_DEEP_LINK_PATH?$OBJECT_DEEP_LINK_ID_PARAM=$objectId"
+
+    /** Deep link that opens the [RecordingDetails] screen for a local recording.
+     *  Used by the Index notifications so tapping e.g. a completed-answer
+     *  notification opens that recording. Parsed by `CoreDeepLinkHandler`. */
+    const val RECORDING_DEEP_LINK_PATH = "recording"
+    fun recordingDeepLink(recordingId: Long) =
+        "pebblecore://$OBJECT_DEEP_LINK_HOST/$RECORDING_DEEP_LINK_PATH?$OBJECT_DEEP_LINK_ID_PARAM=$recordingId"
+}
+
+/** Registers a ring destination inside [IndexThemeHost], so screens read
+ *  `IndexTheme.colors` without each providing them. */
+private inline fun <reified T : Any> NavGraphBuilder.indexComposable(
+    noinline content: @Composable (NavBackStackEntry) -> Unit,
+) = composable<T> { entry ->
+    IndexThemeHost { content(entry) }
 }
 
 fun NavGraphBuilder.addRingRoutes(coreNav: CoreNav) {
-    composable<RingRoutes.RecordingDetails> {
+    indexComposable<RingRoutes.RecordingDetails> {
         val route: RingRoutes.RecordingDetails = it.toRoute()
         RecordingDetails(route.recordingId, coreNav)
     }
-    composable<RingRoutes.ObjectDetails> {
+    indexComposable<RingRoutes.ObjectDetails> {
         val route: RingRoutes.ObjectDetails = it.toRoute()
         ObjectDetail(coreNav, route.objectId, startEditing = route.startEditing)
     }
-    composable<RingRoutes.FullFeed> {
+    indexComposable<RingRoutes.FullFeed> {
         FullFeed(coreNav)
     }
-    composable<RingRoutes.AllLists> {
+    indexComposable<RingRoutes.AllLists> {
         AllLists(coreNav)
     }
-    composable<RingRoutes.AllAnswers> {
+    indexComposable<RingRoutes.AllAnswers> {
         AllAnswers(coreNav)
     }
-    composable<RingRoutes.Settings> {
+    indexComposable<RingRoutes.Settings> {
         IndexSettings(coreNav)
     }
     composable(
@@ -106,13 +124,13 @@ fun NavGraphBuilder.addRingRoutes(coreNav: CoreNav) {
     ) {
         ListenDialog { coreNav.goBack() }
     }
-    composable<RingRoutes.RingSyncInspector> {
+    indexComposable<RingRoutes.RingSyncInspector> {
         RingSyncInspectorScreen(coreNav)
     }
-    composable<RingRoutes.McpSandboxGroups> {
+    indexComposable<RingRoutes.McpSandboxGroups> {
         McpSandboxGroups(coreNav)
     }
-    composable<RingRoutes.AddIntegration> {
+    indexComposable<RingRoutes.AddIntegration> {
         AddIntegration(coreNav)
     }
 }

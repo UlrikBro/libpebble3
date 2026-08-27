@@ -25,9 +25,11 @@ import kotlin.time.Duration.Companion.seconds
 class ConnectivityWatcher(private val scope: ConnectionCoroutineScope) {
     private val logger = Logger.withTag("ConnectivityWatcher")
     private val _status = MutableStateFlow<ConnectivityStatus?>(null)
+    private var gattClient: ConnectedGattClient? = null
     val status = _status.asStateFlow().filterNotNull()
 
-    suspend fun subscribe(gattClient: ConnectedGattClient): Boolean = withTimeoutOrNull(10.seconds) {
+    suspend fun subscribe(client: ConnectedGattClient): Boolean = withTimeoutOrNull(10.seconds) {
+        gattClient = client
         scope.launch {
             // collect{} below can throw "Authorization is insufficient" if started too early,
             // and can also fire mid-flow during pairing renegotiation on iOS (MOB-6632). On
@@ -38,16 +40,17 @@ class ConnectivityWatcher(private val scope: ConnectionCoroutineScope) {
             // the connection scope is cancelled.
             var attempt = 0
             while (true) {
-                val sub = gattClient.subscribeToCharacteristic(PAIRING_SERVICE_UUID, CONNECTIVITY_CHARACTERISTIC)
+                val sub = gattClient?.subscribeToCharacteristic(
+                    serviceUuid = PAIRING_SERVICE_UUID,
+                    characteristicUuid = CONNECTIVITY_CHARACTERISTIC,
+                    // Kable writes the CCCD lazily, on first collection: anything the watch
+                    // notifies before that is lost, so re-read once notifications are live.
+                    onSubscription = { readValue() },
+                )
                 if (sub == null) {
                     logger.w { "sub is null" }
                 }
-                val connectivity = gattClient.readCharacteristic(PAIRING_SERVICE_UUID, CONNECTIVITY_CHARACTERISTIC)
-                if (connectivity != null) {
-                    _status.value = ConnectivityStatus(connectivity).also {
-                        logger.d("connectivity (read): $it")
-                    }
-                }
+                readValue()
                 if (attempt == 0) delay(INITIAL_SUBSCRIBE_DELAY)
                 sub?.collectConnectivityChanges()
                 attempt++
@@ -58,6 +61,15 @@ class ConnectivityWatcher(private val scope: ConnectionCoroutineScope) {
         }
         true
     } ?: false
+
+    suspend fun readValue() {
+        val connectivity = gattClient?.readCharacteristic(PAIRING_SERVICE_UUID, CONNECTIVITY_CHARACTERISTIC)
+        if (connectivity != null) {
+            _status.value = ConnectivityStatus(connectivity).also {
+                logger.d("connectivity (read): $it")
+            }
+        }
+    }
 
     companion object {
         private val INITIAL_SUBSCRIBE_DELAY = 2.seconds

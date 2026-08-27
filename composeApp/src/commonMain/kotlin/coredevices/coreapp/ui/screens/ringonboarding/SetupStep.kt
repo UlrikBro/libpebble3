@@ -22,14 +22,19 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -57,7 +62,9 @@ import coredevices.ring.agent.integrations.GTasksIntegration
 import coredevices.ring.agent.integrations.NotionIntegration
 import coredevices.ring.database.MusicControlMode
 import coredevices.ring.database.Preferences
-import coredevices.ring.database.SecondaryMode
+import coredevices.ring.service.button.GestureDestination
+import coredevices.ring.service.button.RingGesture
+import coredevices.ring.service.button.musicRoutesFor
 import coredevices.ring.ui.screens.settings.EncryptionKeyResultDialogs
 import coredevices.ring.ui.screens.settings.EncryptionSetupDialog
 import coredevices.ring.ui.screens.settings.GTasksDialog
@@ -65,6 +72,8 @@ import coredevices.ring.ui.screens.settings.NotionDialog
 import coredevices.ring.ui.viewmodel.SettingsViewModel
 import coredevices.ui.SignInDialog
 import coredevices.util.CoreConfigHolder
+import coredevices.util.Permission
+import coredevices.util.PermissionRequester
 import coredevices.util.STTConfig
 import coredevices.util.emailOrNull
 import coredevices.util.integrations.Integration
@@ -73,6 +82,12 @@ import coredevices.util.models.ModelInfo
 import coredevices.util.models.ModelManager
 import coredevices.util.models.RecommendedModel
 import coredevices.util.rememberUiContext
+import coredevices.util.transcription.PlatformSpeechRecognizer
+import coredevices.util.transcription.SpokenLanguageOptions
+import coredevices.util.transcription.coversLanguage
+import androidx.compose.ui.text.intl.Locale
+import coredevices.ring.ui.screens.settings.IndexAgentActionsSection
+import coredevices.ring.ui.screens.settings.RingButtonSection
 import dev.gitlive.firebase.Firebase
 import dev.gitlive.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
@@ -97,8 +112,10 @@ internal fun SetupStep(
 ) {
     BackHandler { onBack() }
     val palette = LocalPalette.current
-    val musicControlMode by viewModel.musicControlMode.collectAsState()
-    val secondaryMode by viewModel.secondaryMode.collectAsState()
+    val gestureRoutes by viewModel.gestureRoutes.collectAsState()
+    val musicPresetSelected = { mode: MusicControlMode ->
+        musicRoutesFor(mode).all { (gesture, destination) -> gestureRoutes[gesture] == destination }
+    }
     val currentReminderProvider by preferences.reminderProvider.collectAsState()
     val currentNoteProvider by preferences.noteProvider.collectAsState()
 
@@ -163,8 +180,73 @@ internal fun SetupStep(
         }
     }
     val cactusSupported = remember { isCactusSupported() }
+    val platformSpeechRecognizer: PlatformSpeechRecognizer = koinInject()
+    val platformSttAvailable by produceState(false) {
+        value = withContext(Dispatchers.Default) { platformSpeechRecognizer.isAvailable() }
+    }
+    val deviceLanguage = Locale.current.language
+    val platformLanguageTags by platformSpeechRecognizer.supportedLanguageTags.collectAsState()
+    val platformSupportsDeviceLanguage = platformLanguageTags.coversLanguage(deviceLanguage)
+    val permissionRequester: PermissionRequester = koinInject()
+    val uiContext = rememberUiContext()
+    // The permission is also nagged for while this mode is configured; asking here means the
+    // engine is usable straight away rather than falling back to cloud until the nag is answered.
+    val selectPlatformStt: () -> Unit = {
+        coreConfigHolder.update(
+            coreConfig.copy(sttConfig = coreConfig.sttConfig.copy(mode = CactusSTTMode.PlatformOnly))
+        )
+        uiContext?.let { context ->
+            scope.launch {
+                permissionRequester.requestPermission(Permission.SpeechRecognizer, context)
+            }
+        }
+    }
+    // Default to the free on-device system engine when this phone supports it (iOS 26+)
+    // and can transcribe the phone's language; otherwise keep the cloud default. One-shot
+    // (persisted) so re-entering onboarding never overrides a deliberate cloud choice.
+    LaunchedEffect(platformSttAvailable, platformSupportsDeviceLanguage) {
+        if (platformSttAvailable && platformSupportsDeviceLanguage &&
+            !preferences.platformSttDefaulted &&
+            coreConfig.sttConfig.mode == CactusSTTMode.RemoteOnly
+        ) {
+            preferences.setPlatformSttDefaulted()
+            selectPlatformStt()
+        }
+    }
+    var showPlatformInfoDialog by remember { mutableStateOf(false) }
+    if (showPlatformInfoDialog) {
+        val languages = remember(platformLanguageTags) {
+            platformLanguageTags
+                .map { it.substringBefore('-').lowercase() }.distinct()
+                .mapNotNull { code -> SpokenLanguageOptions.firstOrNull { it.first == code }?.second }
+                .sorted()
+        }
+        AlertDialog(
+            onDismissRequest = { showPlatformInfoDialog = false },
+            title = { Text("On-device speech recognition") },
+            text = {
+                Text(
+                    "Uses Apple's built-in speech recognition — no download needed. " +
+                        "Audio is processed on your phone, falling back to cloud " +
+                        "transcription if the language isn't supported or on-device " +
+                        "transcription fails." +
+                        if (languages.isEmpty()) {
+                            ""
+                        } else {
+                            "\n\nSupported languages:\n" + languages.joinToString(", ")
+                        }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showPlatformInfoDialog = false }) { Text("OK") }
+            },
+        )
+    }
     val selectSpeechMode: (CactusSTTMode) -> Unit = { mode ->
+        // An explicit choice disables the one-shot auto-default, even if it hasn't fired yet.
+        preferences.setPlatformSttDefaulted()
         when {
+            mode == CactusSTTMode.PlatformOnly -> selectPlatformStt()
             mode != CactusSTTMode.RemoteOnly && !cactusSupported -> {
                 snackbarDisplay.showSnackbar("This device doesn't support local speech recognition")
             }
@@ -207,61 +289,28 @@ internal fun SetupStep(
                 SpeechModeChoice(
                     mode = coreConfig.sttConfig.mode,
                     onChange = selectSpeechMode,
+                    showPlatformOption = platformSttAvailable,
+                    onPlatformInfo = { showPlatformInfoDialog = true },
                 )
             }
         }
 
-        // 2 — Notes & reminders
+        // 2 — Ring button
         NumberedSection(
             num = 2,
-            title = "Notes & reminders",
-            sub = "Set a default destination for recordings that contain notes or reminders.",
+            title = "Ring Button",
+            sub = "Choose what each press does. You can change this later in Index settings.",
         ) {
-            RoutingMatrix(
-                preferences = preferences,
-                isAndroid = isAndroid,
-                currentReminderProvider = currentReminderProvider,
-                currentNoteProvider = currentNoteProvider,
-            )
+            RingButtonSection(viewModel)
         }
 
-        // 3 — Music play/pause
+        // 3 — Index agent actions
         NumberedSection(
             num = 3,
-            title = "Music play/pause",
-            sub = if (isAndroid) "Single or double click without holding to play/pause music."
-            else "Only available right now on Android.",
+            title = "Index Agent",
+            sub = "Pick which actions Index can take, and where notes and reminders are saved."
         ) {
-            val musicEnabled = isAndroid
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                PressTile(
-                    label = "Disabled",
-                    pattern = PressPattern.None,
-                    selected = musicControlMode == MusicControlMode.Disabled,
-                    enabled = musicEnabled,
-                    onClick = { viewModel.setMusicControlMode(MusicControlMode.Disabled) },
-                    modifier = Modifier.weight(1f),
-                )
-                PressTile(
-                    label = "Single",
-                    pattern = PressPattern.Single,
-                    selected = musicControlMode == MusicControlMode.SingleClick,
-                    enabled = musicEnabled,
-                    onClick = { viewModel.setMusicControlMode(MusicControlMode.SingleClick) },
-                    modifier = Modifier.weight(1f),
-                )
-                PressTile(
-                    label = "Double",
-                    pattern = PressPattern.Double,
-                    selected = musicControlMode == MusicControlMode.DoubleClick,
-                    enabled = musicEnabled,
-                    onClick = { viewModel.setMusicControlMode(MusicControlMode.DoubleClick) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
+            IndexAgentActionsSection(coreNav, viewModel, showHeader = false)
         }
 
         // 4 — Secondary action
@@ -277,15 +326,19 @@ internal fun SetupStep(
                 PressTile(
                     label = "Disabled",
                     pattern = PressPattern.None,
-                    selected = secondaryMode == SecondaryMode.Disabled,
-                    onClick = { viewModel.setSecondaryMode(SecondaryMode.Disabled) },
+                    selected = gestureRoutes[RingGesture.ClickHold] == GestureDestination.IndexAgent,
+                    onClick = {
+                        viewModel.setGestureRoute(RingGesture.ClickHold, GestureDestination.IndexAgent)
+                    },
                     modifier = Modifier.weight(1f),
                 )
                 PressTile(
                     label = "Search",
                     pattern = PressPattern.ShortHold,
-                    selected = secondaryMode == SecondaryMode.Search,
-                    onClick = { viewModel.setSecondaryMode(SecondaryMode.Search) },
+                    selected = gestureRoutes[RingGesture.ClickHold] == GestureDestination.WebSearch,
+                    onClick = {
+                        viewModel.setGestureRoute(RingGesture.ClickHold, GestureDestination.WebSearch)
+                    },
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -532,12 +585,16 @@ private fun CardContainer(content: @Composable () -> Unit) {
 internal fun SpeechModeChoice(
     mode: CactusSTTMode,
     onChange: (CactusSTTMode) -> Unit,
+    showPlatformOption: Boolean = false,
+    onPlatformInfo: (() -> Unit)? = null,
 ) {
-    val options = listOf(
+    val options = listOfNotNull(
+        Triple(CactusSTTMode.PlatformOnly, "On-device", "Recommended - private, stays on this iPhone")
+            .takeIf { showPlatformOption },
         Triple(CactusSTTMode.RemoteOnly, "Cloud only", "Best performance, requires connection"),
-        Triple(CactusSTTMode.RemoteFirst, "Cloud, with local fallback", "Recommended, 670MB download"),
-        Triple(CactusSTTMode.LocalFirst, "Local, cloud fallback", "670MB download"),
-        Triple(CactusSTTMode.LocalOnly, "Local only", "Complete privacy, 670MB download"),
+        Triple(CactusSTTMode.RemoteFirst, "Cloud, with local fallback", "Recommended, 400MB download")
+            .takeIf { !showPlatformOption },
+        Triple(CactusSTTMode.LocalOnly, "Local only", "Complete privacy, 400MB download"),
     )
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         options.forEach { (m, title, sub) ->
@@ -546,6 +603,7 @@ internal fun SpeechModeChoice(
                 sub = sub,
                 selected = mode == m,
                 onClick = { onChange(m) },
+                onInfo = onPlatformInfo.takeIf { m == CactusSTTMode.PlatformOnly },
             )
         }
     }
@@ -557,6 +615,7 @@ private fun SpeechRadioCard(
     sub: String,
     selected: Boolean,
     onClick: () -> Unit,
+    onInfo: (() -> Unit)? = null,
 ) {
     val palette = LocalPalette.current
     Surface(
@@ -597,365 +656,16 @@ private fun SpeechRadioCard(
                     color = palette.onSurfaceVariant,
                 )
             }
-        }
-    }
-}
-
-private data class RoutingProvider(
-    val name: String,
-    val sub: String?,
-    val supportsReminder: Boolean,
-    val supportsNote: Boolean,
-    val reminderValue: ReminderProvider?,
-    val noteValue: NoteProvider?,
-)
-
-private data class AvailableProvider(
-    val name: String,
-    val sub: String?,
-    val kindsLabel: String,
-    val onAdd: () -> Unit,
-)
-
-@Composable
-internal fun RoutingMatrix(
-    preferences: Preferences,
-    isAndroid: Boolean,
-    currentReminderProvider: ReminderProvider,
-    currentNoteProvider: NoteProvider,
-) {
-    val palette = LocalPalette.current
-    val gTasks = koinInject<GTasksIntegration>()
-    val notion = koinInject<NotionIntegration>()
-    // Bumped after a sign-in dialog dismisses, to re-check auth state.
-    var authRefresh by remember { mutableStateOf(0) }
-    val gTasksAuth by produceAuthState(authRefresh, gTasks::isAuthorized)
-    val notionAuth by produceAuthState(authRefresh, notion::isAuthorized)
-
-    var showGTasksDialog by remember { mutableStateOf(false) }
-    var showNotionDialog by remember { mutableStateOf(false) }
-    if (showGTasksDialog) {
-        GTasksDialog(onDismiss = {
-            showGTasksDialog = false
-            authRefresh++
-        })
-    }
-    if (showNotionDialog) {
-        NotionDialog(onDismiss = {
-            showNotionDialog = false
-            authRefresh++
-        })
-    }
-
-    val visible = buildList {
-        add(
-            RoutingProvider(
-                name = "Index",
-                sub = "Built into Pebble app",
-                supportsReminder = true,
-                supportsNote = true,
-                reminderValue = ReminderProvider.BuiltIn,
-                noteValue = NoteProvider.Builtin,
-            )
-        )
-        if (!isAndroid) {
-            add(
-                RoutingProvider(
-                    name = "iPhone Reminders",
-                    sub = "Built into iOS",
-                    supportsReminder = true,
-                    supportsNote = false,
-                    reminderValue = ReminderProvider.IOSReminders,
-                    noteValue = null,
-                )
-            )
-        }
-        if (gTasksAuth) {
-            add(
-                RoutingProvider(
-                    name = "Google Tasks",
-                    sub = null,
-                    supportsReminder = true,
-                    supportsNote = false,
-                    reminderValue = ReminderProvider.GoogleTasks,
-                    noteValue = null,
-                )
-            )
-        }
-        if (notionAuth) {
-            add(
-                RoutingProvider(
-                    name = "Notion",
-                    sub = "Append notes to a Notion page",
-                    supportsReminder = false,
-                    supportsNote = true,
-                    reminderValue = null,
-                    noteValue = NoteProvider.Notion,
-                )
-            )
-        }
-    }
-
-    val available = buildList {
-        if (!gTasksAuth) {
-            add(
-                AvailableProvider(
-                    name = "Google Tasks",
-                    sub = null,
-                    kindsLabel = "REMINDERS",
-                    onAdd = { showGTasksDialog = true },
-                )
-            )
-        }
-        if (!notionAuth) {
-            add(
-                AvailableProvider(
-                    name = "Notion",
-                    sub = "Append notes to a Notion page",
-                    kindsLabel = "NOTES",
-                    onAdd = { showNotionDialog = true },
-                )
-            )
-        }
-    }
-
-    var showAdd by remember { mutableStateOf(false) }
-
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        color = palette.surfaceContainerLowest,
-        border = BorderStroke(1.dp, palette.outlineVariant),
-    ) {
-        Column {
-            // Column headers
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Spacer(Modifier.weight(1f))
-                Text(
-                    "REMINDERS",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp,
-                    color = palette.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.width(88.dp),
-                )
-                Text(
-                    "NOTES",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.8.sp,
-                    color = palette.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.width(88.dp),
-                )
-            }
-            visible.forEach { p ->
-                HorizontalDivider(thickness = 1.dp, color = palette.outlineVariant)
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            p.name,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.onSurface,
-                        )
-                        if (p.sub != null) {
-                            Text(
-                                p.sub,
-                                fontSize = 11.sp,
-                                color = palette.onSurfaceVariant,
-                            )
-                        }
-                    }
-                    Box(modifier = Modifier.width(88.dp), contentAlignment = Alignment.Center) {
-                        if (p.supportsReminder && p.reminderValue != null) {
-                            RouteRadio(
-                                selected = currentReminderProvider == p.reminderValue,
-                                onClick = { preferences.setReminderProvider(p.reminderValue) },
-                            )
-                        }
-                    }
-                    Box(modifier = Modifier.width(88.dp), contentAlignment = Alignment.Center) {
-                        if (p.supportsNote && p.noteValue != null) {
-                            RouteRadio(
-                                selected = currentNoteProvider == p.noteValue,
-                                onClick = { preferences.setNoteProvider(p.noteValue) },
-                            )
-                        }
-                    }
-                }
-            }
-
-            if (available.isNotEmpty()) {
-                HorizontalDivider(thickness = 1.dp, color = palette.outlineVariant)
-                if (!showAdd) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { showAdd = true }
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        Icon(
-                            Icons.Default.Add,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = palette.primary,
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Add destination",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = palette.primary,
-                        )
-                    }
-                } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(palette.surfaceContainerLow)
-                            .padding(start = 14.dp, end = 14.dp, top = 14.dp, bottom = 12.dp),
-                    ) {
-                        // Header row: ADD DESTINATION ... Cancel
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(start = 4.dp, end = 4.dp, bottom = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "ADD DESTINATION",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                letterSpacing = 0.8.sp,
-                                color = palette.onSurfaceVariant,
-                            )
-                            Spacer(Modifier.weight(1f))
-                            Text(
-                                "Cancel",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = palette.onSurfaceVariant,
-                                modifier = Modifier
-                                    .clickable { showAdd = false }
-                                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                            )
-                        }
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            available.forEach { p ->
-                                AvailableProviderCard(
-                                    provider = p,
-                                    onAdd = p.onAdd,
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun AvailableProviderCard(
-    provider: AvailableProvider,
-    onAdd: () -> Unit,
-) {
-    val palette = LocalPalette.current
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = palette.surfaceContainerLowest,
-        border = BorderStroke(1.dp, palette.outlineVariant),
-    ) {
-        Row(
-            modifier = Modifier.padding(start = 14.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = provider.name,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = palette.onSurface,
-                )
-                if (provider.sub != null) {
-                    Spacer(Modifier.height(1.dp))
-                    Text(
-                        text = provider.sub,
-                        fontSize = 11.sp,
-                        color = palette.onSurfaceVariant,
+            if (onInfo != null) {
+                IconButton(onClick = onInfo, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Outlined.Info,
+                        contentDescription = "Supported languages",
+                        tint = palette.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             }
-            // Kind badge
-            Surface(
-                shape = RoundedCornerShape(6.dp),
-                color = palette.primaryContainer,
-            ) {
-                Text(
-                    text = provider.kindsLabel,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.6.sp,
-                    color = palette.primary,
-                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                )
-            }
-            Spacer(Modifier.width(10.dp))
-            // + button
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(CircleShape)
-                    .background(palette.primary)
-                    .clickable { onAdd() },
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = "Add ${provider.name}",
-                    modifier = Modifier.size(16.dp),
-                    tint = palette.onPrimary,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun RouteRadio(
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(26.dp)
-            .clip(CircleShape)
-            .border(
-                width = 2.dp,
-                color = if (selected) LocalPalette.current.primary else LocalPalette.current.outline,
-                shape = CircleShape,
-            )
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center,
-    ) {
-        if (selected) {
-            Box(
-                modifier = Modifier
-                    .size(14.dp)
-                    .clip(CircleShape)
-                    .background(LocalPalette.current.primary),
-            )
         }
     }
 }

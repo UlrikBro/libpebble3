@@ -70,6 +70,7 @@ import io.rebble.libpebblecommon.connection.bt.ble.transport.GattServerManager
 import io.rebble.libpebblecommon.connection.bt.ble.transport.bleScanner
 import io.rebble.libpebblecommon.connection.bt.ble.transport.impl.KableGattConnector
 import io.rebble.libpebblecommon.connection.bt.classic.pebble.PebbleBtClassic
+import io.rebble.libpebblecommon.connection.qemu.QemuTransport
 import io.rebble.libpebblecommon.connection.devconnection.CloudpebbleProxyProtocolVersion
 import io.rebble.libpebblecommon.connection.devconnection.DevConnectionCloudpebbleProxy
 import io.rebble.libpebblecommon.connection.devconnection.DevConnectionManager
@@ -80,6 +81,7 @@ import io.rebble.libpebblecommon.connection.endpointmanager.CompanionAppLifecycl
 import io.rebble.libpebblecommon.connection.endpointmanager.DebugPebbleProtocolSender
 import io.rebble.libpebblecommon.connection.endpointmanager.FirmwareUpdater
 import io.rebble.libpebblecommon.connection.endpointmanager.LanguagePackInstaller
+import io.rebble.libpebblecommon.connection.endpointmanager.InterruptedFirmwareUpdates
 import io.rebble.libpebblecommon.connection.endpointmanager.RealFirmwareUpdater
 import io.rebble.libpebblecommon.connection.endpointmanager.RealLanguagePackInstaller
 import io.rebble.libpebblecommon.connection.endpointmanager.audio.VoiceSessionManager
@@ -113,6 +115,7 @@ import io.rebble.libpebblecommon.js.HttpInterceptorManager
 import io.rebble.libpebblecommon.js.InjectedPKJSHttpInterceptors
 import io.rebble.libpebblecommon.js.JsTokenUtil
 import io.rebble.libpebblecommon.js.RemoteTimelineEmulator
+import io.rebble.libpebblecommon.imaging.ImagingService
 import io.rebble.libpebblecommon.locker.Locker
 import io.rebble.libpebblecommon.locker.LockerPBWCache
 import io.rebble.libpebblecommon.locker.StaticLockerPBWCache
@@ -362,7 +365,7 @@ fun initKoin(
                 single { get<Database>().appPrefsDao() }
                 singleOf(::LegacyBtClassicMigrator)
                 singleOf(::WatchManager) bind WatchConnector::class
-                single { bleScanner() }
+                single { bleScanner(get()) }
                 singleOf(::RealScanning) bind Scanning::class
                 single { libPebbleScope }
                 singleOf(::Locker)
@@ -436,6 +439,7 @@ fun initKoin(
                 singleOf(::PhoneCalendarSyncer)
                 singleOf(::MissedCallSyncer)
                 singleOf(::FirmwareDownloader)
+                singleOf(::InterruptedFirmwareUpdates)
                 singleOf(::JsTokenUtil)
                 singleOf(::Datalogging) bind CustomDataLogging::class
                 singleOf(::Health)
@@ -462,12 +466,13 @@ fun initKoin(
                     scoped { get<ConnectionScopeProperties>().identifier as PebbleBleIdentifier }
                     scoped { get<ConnectionScopeProperties>().identifier as PebbleBtClassicIdentifier }
                     scoped { get<ConnectionScopeProperties>().identifier as PebbleSocketIdentifier }
-                    scoped { (get<ConnectionScopeProperties>().platformIdentifier as PlatformIdentifier.BlePlatformIdentifier).peripheral }
+                    scoped { get<ConnectionScopeProperties>().platformIdentifier as PlatformIdentifier.BlePlatformIdentifier }
 
                     // Connection
                     scopedOf(::KableGattConnector)
                     scopedOf(::PebbleBle)
                     scopedOf(::PebbleBtClassic)
+                    scopedOf(::QemuTransport)
                     scopedOf(::RealConnectionAnalyticsLogger) bind ConnectionAnalyticsLogger::class
                     scoped<GattConnector> {
                         when (val id = get<PebbleIdentifier>()) {
@@ -480,6 +485,7 @@ fun initKoin(
                         when (val id = get<PebbleIdentifier>()) {
                             is PebbleBleIdentifier -> get<PebbleBle>()
                             is PebbleBtClassicIdentifier -> get<PebbleBtClassic>()
+                            is PebbleSocketIdentifier -> get<QemuTransport>()
                             else -> error("Transport not implemented for: $id")
                         }
                     }
@@ -495,7 +501,8 @@ fun initKoin(
                             get(), get(), get(),
                             get(), get(), get(),
                             get(), get(), get(),
-                            get(), get(), get(), get(),
+                            get(), get(), get(), get(), get(),
+                            get(),
                         )
                     } bind PebbleConnector::class
                     scopedOf(::PebbleProtocolRunner)
@@ -527,6 +534,7 @@ fun initKoin(
                     scopedOf(::GetBytesService)
                     scopedOf(::PhoneControlService)
                     scopedOf(::MusicService)
+                    scopedOf(::ImagingService)
                     scopedOf(::ScreenshotService)
                     scopedOf(::VoiceService)
                     scopedOf(::AudioStreamService)
@@ -556,6 +564,7 @@ fun initKoin(
                                     get<DevConnectionCloudpebbleProxy>()
                                 }
                             }.distinctUntilChanged(),
+                            lanServer = get<DevConnectionServer>(),
                             identifier = get(),
                             protocolHandler = get(),
                             companionAppLifecycleManager = get(),

@@ -2,13 +2,13 @@ package coredevices.ring.ui.screens.settings
 
 import BugReportButton
 import CoreNav
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,32 +19,44 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Headphones
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -61,6 +73,8 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -70,10 +84,10 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import co.touchlab.kermit.Logger
 import coreapp.util.generated.resources.back
-import coreapp.util.generated.resources.ring_wireframe
 import coreapp.util.generated.resources.settings
-import coredevices.indexai.data.entity.mcp_sandbox.McpSandboxGroupEntity
+import coredevices.ring.agent.LlmMode
 import coredevices.ring.agent.builtin_servlets.notes.NoteIntegrationFactory
 import coredevices.ring.agent.builtin_servlets.notes.NoteProvider
 import coredevices.ring.agent.builtin_servlets.notes.TASKER_DEFINITION
@@ -82,17 +96,15 @@ import coredevices.ring.agent.integrations.GTasksIntegration
 import coredevices.ring.agent.integrations.NotionIntegration
 import coredevices.ring.agent.integrations.obsidian.ObsidianIntegration
 import coredevices.ring.data.NoteShortcutType
-import coredevices.ring.database.MusicControlMode
 import coredevices.ring.database.Preferences
-import coredevices.ring.database.SecondaryMode
 import coredevices.ring.encryption.EncryptionSetupState
 import coredevices.ring.encryption.KeyStorageStatus
-import coredevices.ring.external.indexwebhook.IndexWebhookSettingsDialog
 import coredevices.ring.external.indexwebhook.IndexWebhookSettingsViewModel
 import coredevices.ring.ui.PreviewWrapper
 import coredevices.ring.ui.components.QrCodeImage
 import coredevices.ring.ui.components.SectionHeader
 import coredevices.ring.ui.navigation.RingRoutes
+import coredevices.ring.ui.theme.IndexTheme
 import coredevices.ring.ui.viewmodel.SettingsViewModel
 import coredevices.ring.ui.viewmodel.pickZipFile
 import coredevices.ui.M3Dialog
@@ -108,78 +120,93 @@ import coredevices.util.isIOS
 import coredevices.util.rememberUiContext
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
-import org.jetbrains.compose.resources.imageResource
 import org.jetbrains.compose.resources.stringResource
 import org.jetbrains.compose.ui.tooling.preview.Preview
+import androidx.compose.runtime.produceState
+import com.cactus.isCactusSupported
+import coredevices.util.CoreConfigHolder
+import coredevices.util.models.ModelManager
+import coredevices.util.transcription.PlatformSpeechRecognizer
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import coredevices.util.models.CactusSTTMode
 import org.koin.compose.koinInject
 import org.koin.compose.viewmodel.koinViewModel
 import coreapp.util.generated.resources.Res as UtilRes
+
+// openUri throws if nothing can handle the link (no browser, DPC policy);
+// don't let a help link tap crash the settings screen.
+internal fun UriHandler.openUrlSafely(url: String) {
+    try {
+        openUri(url)
+    } catch (e: Exception) {
+        Logger.w(e) { "Failed to open URL: $url" }
+    }
+}
 
 @Composable
 fun IndexSettings(coreNav: CoreNav) {
     val viewModel = koinViewModel<SettingsViewModel>()
     val webhookViewModel = koinViewModel<IndexWebhookSettingsViewModel>()
-    val useCactusAgent by viewModel.useCactusAgent.collectAsState()
-    val showMusicControlDialog by viewModel.showMusicControlDialog.collectAsState()
+    val llmMode by viewModel.llmMode.collectAsState()
+    val localLlmSupported by viewModel.localLlmSupported.collectAsState()
     val debugDetailsEnabled by viewModel.debugDetailsEnabled.collectAsState()
     val showContactsDialog by viewModel.showContactsDialog.collectAsState()
-    val showSecondaryModeDialog by viewModel.showSecondaryModeDialog.collectAsState()
     val showNoteShortcutDialog by viewModel.showNoteShortcutDialog.collectAsState()
+    val autoDismissActionNotifications by viewModel.autoDismissActionNotifications.collectAsState()
     val platform = koinInject<Platform>()
+    val coreConfigHolder = koinInject<CoreConfigHolder>()
+    val coreConfig by coreConfigHolder.config.collectAsState()
+    val modelManager = koinInject<ModelManager>()
+    val platformSpeechRecognizer = koinInject<PlatformSpeechRecognizer>()
+    val speechPermissionRequester = koinInject<PermissionRequester>()
+    val speechUiContext = rememberUiContext()
+    val speechScope = rememberCoroutineScope()
+    val onDeviceSpeechSupported = remember { isCactusSupported() }
+    val modelDownloadStatus by modelManager.modelDownloadStatus.collectAsState()
+    val hasOfflineSpeechModels by produceState(false, modelDownloadStatus) {
+        value = withContext(Dispatchers.Default) {
+            modelManager.getRecommendedSTTModel().modelSlug in modelManager.getDownloadedSTTModelSlugs()
+        }
+    }
+    val platformSttAvailable by produceState(false) {
+        value = withContext(Dispatchers.Default) { platformSpeechRecognizer.isAvailable() }
+    }
     val webhookUrl by webhookViewModel.webhookUrl.collectAsState()
+    val configuredWebhookGesture by webhookViewModel.configuredGesture.collectAsState()
     val webhookIsLinked = !webhookUrl.isNullOrBlank()
-    val webhookDialogOpen by webhookViewModel.dialogOpen.collectAsState()
     val currentRingFirmware by viewModel.currentRingFirmware.collectAsStateWithLifecycle()
     val currentRing by viewModel.currentRingName.collectAsStateWithLifecycle()
     val currentRingPaired = viewModel.ringPaired.collectAsStateWithLifecycle()
-    val panicPending by viewModel.panicPending.collectAsStateWithLifecycle()
     val ringPaired by remember { derivedStateOf { currentRingPaired.value != null } }
     val accountUsername by viewModel.username.collectAsStateWithLifecycle()
-    val preferences = koinInject<Preferences>()
-    val musicControlMode by viewModel.musicControlMode.collectAsState()
-    val secondaryMode by viewModel.secondaryMode.collectAsState()
     val noteShortcut by viewModel.noteShortcut.collectAsState()
     var showSignInDialog by remember { mutableStateOf(false) }
     var showBackupDialog by remember { mutableStateOf(false) }
+    var showLlmModeSheet by remember { mutableStateOf(false) }
     val availableNoteProviders by viewModel.availableNoteProviders.collectAsState()
     val availableReminderProviders by viewModel.availableReminderProviders.collectAsState()
+
+    val colors = IndexTheme.colors
 
     if (showSignInDialog) {
         SignInDialog(onDismiss = { showSignInDialog = false })
     }
+    IndexWebhookSheetHost()
     if (showContactsDialog && platform.isAndroid) {
         SettingsBeeperContactsDialog(
             onDismissRequest = viewModel::closeContactsDialog
         )
     }
-    if (showMusicControlDialog) {
-        val mode = viewModel.musicControlMode.collectAsState()
-        MusicControlDialog(
-            currentMode = mode.value,
-            onModeSelected = { mode ->
-                viewModel.setMusicControlMode(mode)
-                viewModel.closeMusicControlDialog()
+    if (showLlmModeSheet) {
+        LlmModeSheet(
+            current = llmMode,
+            localSupported = localLlmSupported,
+            onSelect = {
+                viewModel.setLlmMode(it)
+                showLlmModeSheet = false
             },
-            onDismissRequest = {
-                viewModel.closeMusicControlDialog()
-            }
-        )
-    }
-    if (showSecondaryModeDialog) {
-        val mode = viewModel.secondaryMode.collectAsState()
-        val sandboxGroups by viewModel.sandboxGroups.collectAsState()
-        val sandboxGroupId by viewModel.secondaryModeMcpGroupId.collectAsState()
-        SecondaryModeDialog(
-            currentMode = mode.value,
-            sandboxGroups = sandboxGroups,
-            currentSandboxGroupId = sandboxGroupId,
-            onModeSelected = { newMode, groupId ->
-                viewModel.setSecondaryMode(newMode, groupId)
-                viewModel.closeSecondaryModeDialog()
-            },
-            onDismissRequest = {
-                viewModel.closeSecondaryModeDialog()
-            },
+            onDismiss = { showLlmModeSheet = false }
         )
     }
     if (showNoteShortcutDialog) {
@@ -197,9 +224,6 @@ fun IndexSettings(coreNav: CoreNav) {
             }
         )
     }
-    if (webhookDialogOpen) {
-        IndexWebhookSettingsDialog(webhookViewModel)
-    }
     if (showBackupDialog) {
         BackupDialog(
             viewModel = viewModel,
@@ -208,8 +232,15 @@ fun IndexSettings(coreNav: CoreNav) {
     }
 
     Scaffold(
+        containerColor = colors.surface,
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = Color.Transparent,
+                    titleContentColor = colors.primary,
+                    navigationIconContentColor = colors.onSurface,
+                    actionIconContentColor = colors.onSurface,
+                ),
                 navigationIcon = {
                     IconButton(onClick = coreNav::goBack) {
                         Icon(
@@ -218,19 +249,14 @@ fun IndexSettings(coreNav: CoreNav) {
                         )
                     }
                 },
-                title = {
-                    Text(
-                        stringResource(UtilRes.string.settings),
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                },
+                title = { Text(stringResource(UtilRes.string.settings)) },
                 actions = {
                     BugReportButton(
                         coreNav,
                         pebble = false,
                         screenContext = mapOf(
                             "screen" to "Settings",
-                            "useCactusAgent" to useCactusAgent.toString(),
+                            "llmMode" to llmMode.name,
                             "username" to (accountUsername ?: "null")
                         )
                     )
@@ -241,6 +267,73 @@ fun IndexSettings(coreNav: CoreNav) {
         LazyColumn(
             modifier = Modifier.padding(padding).fillMaxHeight()
         ) {
+            // Getting Started guide + FAQ — Index 01 is a new kind of device,
+            // so steer everyone to the guide. Opens in the system browser.
+            item {
+                val uriHandler = LocalUriHandler.current
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = colors.primaryContainer,
+                        contentColor = colors.onPrimaryContainer,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.MenuBook,
+                                contentDescription = null
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "New to Index 01?",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "It's a new kind of gadget! A quick read goes a long way.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            // Inverted colors so the button stands out on the container card
+                            Button(
+                                onClick = { uriHandler.openUrlSafely("https://pbl.zip/index-guide") },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = colors.onPrimaryContainer,
+                                    contentColor = colors.primaryContainer,
+                                ),
+                                modifier = Modifier.weight(1f).height(40.dp)
+                            ) {
+                                Text("Getting Started Guide")
+                                Spacer(Modifier.width(6.dp))
+                                Icon(
+                                    Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                            OutlinedButton(
+                                onClick = { uriHandler.openUrlSafely("https://pbl.zip/index-faq") },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = colors.onPrimaryContainer,
+                                ),
+                                border = BorderStroke(
+                                    1.dp,
+                                    colors.onPrimaryContainer.copy(alpha = 0.5f)
+                                ),
+                                modifier = Modifier.height(40.dp),
+                            ) {
+                                Text("FAQ")
+                            }
+                        }
+                    }
+                }
+            }
+
             // Device card
             item {
                 IndexDeviceListItem(
@@ -249,209 +342,170 @@ fun IndexSettings(coreNav: CoreNav) {
                         ringPaired -> "Paired to Index 01"
                         else -> "No Ring Paired"
                     },
-                    buttons = {
-
-                    },
-                    modifier = Modifier.padding(vertical = 8.dp)
+                    supporting = if (ringPaired) "Paired" else "Not paired",
                 )
             }
 
             // --- Button Actions section ---
             item {
                 SectionHeader(
-                    leadingContent = {
-                        Text(
-                            "Button Actions",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    },
-                    trailingContent = {}
+                    title = "Ring Button",
+                    modifier = Modifier.padding(top = 18.dp, bottom = 2.dp, start = 16.dp, end = 16.dp)
+                )
+            }
+            item { RingButtonSection(viewModel) }
+
+            // --- Actions section ---
+            item { IndexAgentActionsSection(coreNav, viewModel) }
+            item {
+                SettingsRow(
+                    title = "Agent Model",
+                    subtitle = llmModeRowSubtitle(llmMode),
+                    onClick = { showLlmModeSheet = true },
+                ) {
+                    Icon(
+                        Icons.Default.ExpandMore,
+                        contentDescription = null,
+                        tint = colors.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+            }
+            item {
+                SectionHeader(
+                    modifier = Modifier.padding(top = 22.dp, bottom = 2.dp, start = 16.dp, end = 16.dp),
+                    title = "Speech Recognition",
                 )
             }
             item {
-                val isAndroid = platform.isAndroid
-                ListItem(
-                    modifier = Modifier.clickable(enabled = isAndroid) {
-                        viewModel.showMusicControlDialog()
-                    },
-                    headlineContent = {
-                        Text(
-                            if (isAndroid) "Music Play/Pause" else "Music Play/Pause (Only on Android)",
-                            color = if (isAndroid) MaterialTheme.colorScheme.onSurface
-                                    else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                SpeechSection(
+                    mode = coreConfig.sttConfig.mode,
+                    spokenLanguage = coreConfig.sttConfig.spokenLanguage,
+                    onDeviceSupported = onDeviceSpeechSupported,
+                    platformSttAvailable = platformSttAvailable,
+                    hasOfflineModels = hasOfflineSpeechModels,
+                    signedIn = accountUsername != null,
+                    onSelectMode = { mode ->
+                        coreConfigHolder.update(
+                            coreConfig.copy(sttConfig = coreConfig.sttConfig.copy(mode = mode))
                         )
-                    },
-                    supportingContent = {
-                        Text(
-                            when {
-                                !isAndroid -> "Not available on this platform"
-                                else -> when (musicControlMode) {
-                                    MusicControlMode.Disabled -> "Disabled"
-                                    MusicControlMode.SingleClick -> "Single click: Play/Pause · Double click: Next track"
-                                    MusicControlMode.DoubleClick -> "Double click: Play/Pause · Triple click: Next track"
+                        if (mode == CactusSTTMode.PlatformOnly) {
+                            speechUiContext?.let { ctx ->
+                                speechScope.launch {
+                                    speechPermissionRequester.requestPermission(
+                                        Permission.SpeechRecognizer,
+                                        ctx,
+                                    )
                                 }
-                            },
-                            color = if (isAndroid) MaterialTheme.colorScheme.onSurfaceVariant
-                                    else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                        )
-                    }
-                )
-            }
-            item {
-                ListItem(
-                    modifier = Modifier.clickable {
-                        viewModel.showSecondaryModeDialog()
-                    },
-                    headlineContent = { Text("Double click and hold") },
-                    supportingContent = {
-                        Text(
-                            when (secondaryMode) {
-                                SecondaryMode.Disabled -> "Disabled"
-                                SecondaryMode.Search -> "Search"
-                                SecondaryMode.McpSandbox -> "MCP Sandbox"
                             }
-                        )
-                    }
-                )
-            }
-
-            // --- Accounts section ---
-            item {
-                SectionHeader(
-                    leadingContent = {
-                        Text(
-                            "Accounts",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    },
-                    trailingContent = {
-                        IconButton(
-                            onClick = { coreNav.navigateTo(RingRoutes.AddIntegration) },
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = "Add Account")
                         }
-                    }
-                )
-            }
-            item {
-                AuthorizedIntegrations(preferences)
-            }
-            item {
-                ListItem(
-                    modifier = Modifier.clickable {
-                        viewModel.showNoteShortcutDialog()
                     },
-                    headlineContent = { Text("Notification Shortcut") },
-                    supportingContent = {
-                        Text(
-                            when (noteShortcut) {
-                                is NoteShortcutType.SendToMe -> "Email me"
-                                is NoteShortcutType.SendToNoteProvider -> (noteShortcut as NoteShortcutType.SendToNoteProvider).provider.title
-                                is NoteShortcutType.SendToReminderProvider -> (noteShortcut as NoteShortcutType.SendToReminderProvider).provider.title
-                            }
+                    onSelectModeWithModel = { mode, modelSlug ->
+                        coreConfigHolder.update(
+                            coreConfig.copy(
+                                sttConfig = coreConfig.sttConfig.copy(
+                                    mode = mode,
+                                    modelName = modelSlug,
+                                )
+                            )
                         )
-                    }
+                    },
+                    onSelectLanguage = { language ->
+                        coreConfigHolder.update(
+                            coreConfig.copy(
+                                sttConfig = coreConfig.sttConfig.copy(spokenLanguage = language)
+                            )
+                        )
+                    },
+                    onRequireSignIn = { showSignInDialog = true },
                 )
             }
-
-            // --- Advanced section ---
             item {
                 SectionHeader(
+                    modifier = Modifier.padding(top = 22.dp, bottom = 2.dp, start = 16.dp, end = 16.dp),
                     leadingContent = {
                         Text(
                             "Advanced",
                             style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary
+                            color = colors.primary
                         )
                     },
                     trailingContent = {}
                 )
             }
             item {
-                ListItem(
-                    modifier = Modifier.clickable { showBackupDialog = true },
-                    headlineContent = { Text("Backup") },
-                    supportingContent = { Text("Sync, manage, or delete cloud backup") }
+                SettingsRow(
+                    title = "Backup",
+                    subtitle = "Sync, manage, or delete cloud backup",
+                    onClick = { showBackupDialog = true },
                 )
             }
             item {
-                ListItem(
-                    modifier = Modifier.clickable {
-                        coreNav.navigateTo(RingRoutes.McpSandboxGroups)
+                SettingsRow(
+                    title = "MCP & Tool Settings",
+                    subtitle = "Sandbox groups, models, per-tool config",
+                    onClick = { coreNav.navigateTo(RingRoutes.McpSandboxGroups) },
+                )
+            }
+            item {
+                SettingsRow(
+                    title = "Notification Shortcut",
+                    subtitle = when (val shortcut = noteShortcut) {
+                        is NoteShortcutType.SendToMe -> "Email me"
+                        is NoteShortcutType.SendToNoteProvider -> shortcut.provider.title
+                        is NoteShortcutType.SendToReminderProvider -> shortcut.provider.title
                     },
-                    headlineContent = { Text("MCP & Tool Settings") },
-                    supportingContent = {
-                        Text("Configure MCP sandbox and built-in functionality")
-                    }
+                    onClick = viewModel::showNoteShortcutDialog,
                 )
             }
             item {
-                ListItem(
-                    modifier = Modifier.clickable(onClick = viewModel::showContactsDialog, enabled = platform.isAndroid),
-                    headlineContent = { Text("Beeper Contacts") },
-                    supportingContent = {
-                        if (platform.isAndroid) {
-                            Text("Approve Index to send messages to specific contacts")
-                        } else {
-                            Text("Available on Android only")
-                        }
-                    }
-                )
+                SettingsRow(
+                    title = "Auto-dismiss Notifications",
+                    subtitle = "Dismiss recording action notifications after 5 minutes",
+                    onClick = viewModel::toggleAutoDismissActionNotifications,
+                ) {
+                    Switch(
+                        checked = autoDismissActionNotifications,
+                        onCheckedChange = { viewModel.toggleAutoDismissActionNotifications() }
+                    )
+                }
             }
             item {
-                ListItem(
-                    modifier = Modifier.clickable(onClick = viewModel::toggleCactusAgent),
-                    headlineContent = { Text("Use Local LLM") },
-                    supportingContent = {
-                        Text("Experimental! Less accurate than cloud")
+                SettingsRow(
+                    title = "Webhook",
+                    subtitle = if (webhookIsLinked) "Configured, tap to modify" else "Not Linked",
+                    onClick = {
+                        configuredWebhookGesture
+                            ?.let { webhookViewModel.openDialog(it) }
+                            ?: webhookViewModel.openDialog()
                     },
-                    trailingContent = {
-                        Switch(
-                            checked = useCactusAgent,
-                            onCheckedChange = { viewModel.toggleCactusAgent() }
-                        )
-                    }
                 )
             }
             item {
-                ListItem(
-                    modifier = Modifier.clickable(onClick = webhookViewModel::openDialog),
-                    headlineContent = { Text("Webhook") },
-                    supportingContent = {
-                        Text(
-                            if (webhookIsLinked) "Configured, tap to modify"
-                            else "Not Linked"
-                        )
-                    }
-                )
-            }
-            item {
-                ListItem(
-                    headlineContent = { Text("Ring Firmware Version") },
-                    supportingContent = {
-                        Text(currentRingFirmware ?: "Not yet seen device")
-                    }
+                SettingsRow(
+                    title = "Ring Firmware Version",
+                    subtitle = currentRingFirmware ?: "Not yet seen device",
                 )
             }
 
             // --- Debug section ---
-            item { HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp)) }
             item {
-                ListItem(
-                    modifier = Modifier.clickable { viewModel.toggleDebugDetailsEnabled() },
-                    headlineContent = { Text("Enable Debug Details") },
-                    supportingContent = {
-                        Text("Version: ${viewModel.version}")
-                    },
-                    trailingContent = {
-                        Switch(
-                            checked = debugDetailsEnabled,
-                            onCheckedChange = { viewModel.toggleDebugDetailsEnabled() }
-                        )
-                    }
+                HorizontalDivider(
+                    color = colors.outlineVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                 )
+            }
+            item {
+                SettingsRow(
+                    title = "Enable Debug Details",
+                    subtitle = "Version: ${viewModel.version}",
+                    onClick = viewModel::toggleDebugDetailsEnabled,
+                ) {
+                    Switch(
+                        checked = debugDetailsEnabled,
+                        onCheckedChange = { viewModel.toggleDebugDetailsEnabled() }
+                    )
+                }
             }
             if (debugDetailsEnabled) {
                 // Panic Ring button commented out for prod — crashes the app (MOB-7937).
@@ -464,24 +518,17 @@ fun IndexSettings(coreNav: CoreNav) {
                 //     )
                 // }
                 item {
-                    ListItem(
-                        modifier = Modifier.clickable(enabled = !platform.isAndroid) {
-                            viewModel.restartPreemptiveTransfer()
-                        },
-                        headlineContent = { Text("Restart Pre-emptive Transfer") },
-                        supportingContent = {
-                            if (platform.isAndroid) {
-                                Text("Available on iOS only")
-                            }
-                        }
+                    SettingsRow(
+                        title = "Restart Pre-emptive Transfer",
+                        subtitle = "Available on iOS only".takeIf { platform.isAndroid },
+                        enabled = !platform.isAndroid,
+                        onClick = viewModel::restartPreemptiveTransfer,
                     )
                 }
                 item {
-                    ListItem(
-                        modifier = Modifier.clickable {
-                            coreNav.navigateTo(RingRoutes.RingSyncInspector)
-                        },
-                        headlineContent = { Text("Ring Sync Inspector") }
+                    SettingsRow(
+                        title = "Ring Sync Inspector",
+                        onClick = { coreNav.navigateTo(RingRoutes.RingSyncInspector) },
                     )
                 }
             }
@@ -492,241 +539,138 @@ fun IndexSettings(coreNav: CoreNav) {
     }
 }
 
+/** Advanced / Debug list row. M3 [ListItem] paints its own `colorScheme.surface`, which would
+ *  punch white bars through the Index page background. */
 @Composable
-fun MusicControlDialog(
-    currentMode: MusicControlMode,
-    onModeSelected: (MusicControlMode) -> Unit,
-    onDismissRequest: () -> Unit
+internal fun SettingsRow(
+    title: String,
+    subtitle: String? = null,
+    enabled: Boolean = true,
+    onClick: (() -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
 ) {
-    var targetMode by remember { mutableStateOf(currentMode) }
-    M3Dialog(
-        onDismissRequest = onDismissRequest,
-        icon = { Icon(Icons.Default.Headphones, contentDescription = null) },
-        title = { Text("Music Control Mode") },
-        buttons = {
-            TextButton(
-                onClick = onDismissRequest
-            ) {
-                Text("Cancel")
-            }
-            TextButton(
-                onClick = {
-                    onModeSelected(targetMode)
-                }
-            ) {
-                Text("OK")
-            }
-        }
+    val colors = IndexTheme.colors
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (onClick == null) Modifier
+                else Modifier.clickable(enabled = enabled, onClick = onClick)
+            )
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item(MusicControlMode.Disabled) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            targetMode = MusicControlMode.Disabled
-                        }
-                ) {
-                    RadioButton(
-                        selected = targetMode == MusicControlMode.Disabled,
-                        onClick = {
-                            targetMode = MusicControlMode.Disabled
-                        }
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text("Disabled")
-                }
-            }
-            item(MusicControlMode.SingleClick) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            targetMode = MusicControlMode.SingleClick
-                        }
-                ) {
-                    RadioButton(
-                        selected = targetMode == MusicControlMode.SingleClick,
-                        onClick = {
-                            targetMode = MusicControlMode.SingleClick
-                        }
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text("Single click")
-                        Text(
-                            "Single click: Play/Pause. Double click: Next track.",
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-            }
-            item(MusicControlMode.DoubleClick) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            targetMode = MusicControlMode.DoubleClick
-                        }
-                ) {
-                    RadioButton(
-                        selected = targetMode == MusicControlMode.DoubleClick,
-                        onClick = {
-                            targetMode = MusicControlMode.DoubleClick
-                        }
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text("Double click")
-                        Text(
-                            "Double click: Play/Pause. Triple click: Next track.",
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, fontSize = 16.sp, color = colors.onSurface)
+            if (subtitle != null) {
+                Text(subtitle, fontSize = 14.sp, lineHeight = 20.sp, color = colors.onSurfaceVariant)
             }
         }
+        trailing?.invoke()
     }
 }
 
+fun LlmMode.displayName(): String = when (this) {
+    LlmMode.RemoteOnly -> "Cloud LLM"
+    LlmMode.RemoteFirst -> "Cloud LLM (with Local fallback)"
+    LlmMode.LocalOnly -> "Local LLM"
+}
+
+internal fun LlmMode.modeDetail(): String = when (this) {
+    LlmMode.RemoteOnly -> "Best performance, requires connection"
+    LlmMode.RemoteFirst -> "Uses the Local LLM when the cloud can't be reached"
+    LlmMode.LocalOnly -> "Runs on this phone. Experimental, less accurate than Cloud LLM. Does not support all actions."
+}
+
+/** Offered most-cloud first; the enum's own order is persistence ids, not a sensible reading order. */
+internal val llmModeOptions = listOf(LlmMode.RemoteOnly, LlmMode.RemoteFirst, LlmMode.LocalOnly)
+
+/** The Local LLM cannot drive a sandbox group's model, so local modes need the default
+ *  group left on Index Agent. */
+internal fun llmModeSelectable(mode: LlmMode, localSupported: Boolean): Boolean =
+    localSupported || !mode.usesLocalCactus()
+
+internal fun llmModeRowSubtitle(mode: LlmMode): String =
+    if (mode.usesLocalCactus()) "${mode.displayName()} · ${mode.modeDetail()}"
+    else mode.displayName()
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SecondaryModeDialog(
-    currentMode: SecondaryMode,
-    sandboxGroups: List<McpSandboxGroupEntity>,
-    currentSandboxGroupId: Long?,
-    onModeSelected: (SecondaryMode, Long?) -> Unit,
-    onDismissRequest: () -> Unit,
+private fun LlmModeSheet(
+    current: LlmMode,
+    localSupported: Boolean,
+    onSelect: (LlmMode) -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    var targetMode by remember { mutableStateOf(currentMode) }
-    var targetGroupId by remember {
-        mutableStateOf(currentSandboxGroupId ?: sandboxGroups.firstOrNull()?.id)
-    }
-    M3Dialog(
-        onDismissRequest = onDismissRequest,
-        icon = { Icon(Icons.Default.Search, contentDescription = null) },
-        title = { Text("Secondary Mode") },
-        buttons = {
-            TextButton(
-                onClick = onDismissRequest
-            ) {
-                Text("Cancel")
+    val colors = IndexTheme.colors
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.sheetSurface) {
+        Column(modifier = Modifier.padding(bottom = 28.dp)) {
+            Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp)) {
+                Text(
+                    "Agent Model",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.onSurface,
+                )
+                Text(
+                    "Select which large language model (LLM) to use",
+                    fontSize = 12.sp,
+                    color = colors.onSurfaceVariant,
+                )
             }
-            TextButton(
-                onClick = {
-                    onModeSelected(targetMode, targetGroupId)
-                },
-                enabled = targetMode != SecondaryMode.McpSandbox || targetGroupId != null
-            ) {
-                Text("OK")
-            }
-        }
-    ) {
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            item(SecondaryMode.Disabled) {
+            llmModeOptions.forEach { mode ->
+                val selected = mode == current
+                val selectable = llmModeSelectable(mode, localSupported)
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
-                            targetMode = SecondaryMode.Disabled
-                        }
-                ) {
-                    RadioButton(
-                        selected = targetMode == SecondaryMode.Disabled,
-                        onClick = {
-                            targetMode = SecondaryMode.Disabled
-                        }
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text("Disabled")
-                        Text(
-                            "Double click & hold will be the same as a normal click.",
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
-            }
-            item(SecondaryMode.Search) {
-                Row(
+                        .padding(horizontal = 8.dp)
+                        .selectedSheetRowBackground(selected)
+                        .clickable(enabled = selectable) { onSelect(mode) }
+                        .alpha(if (selectable) 1f else 0.38f)
+                        .padding(horizontal = 16.dp, vertical = 11.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable {
-                            targetMode = SecondaryMode.Search
-                        }
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
-                    RadioButton(
-                        selected = targetMode == SecondaryMode.Search,
-                        onClick = {
-                            targetMode = SecondaryMode.Search
-                        }
+                    Icon(
+                        when (mode) {
+                            LlmMode.RemoteOnly -> Icons.Default.Cloud
+                            LlmMode.RemoteFirst -> Icons.Default.CloudSync
+                            LlmMode.LocalOnly -> Icons.Default.Smartphone
+                        },
+                        contentDescription = null,
+                        tint = if (selected) colors.primary else colors.outline,
+                        modifier = Modifier.size(20.dp),
                     )
-                    Spacer(Modifier.width(8.dp))
-                    Column {
-                        Text("Search")
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(mode.displayName(), fontSize = 15.sp, color = colors.onSurface)
                         Text(
-                            "Get web search results on a double click & hold.",
+                            mode.modeDetail(),
                             fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            color = colors.onSurfaceVariant,
+                        )
+                    }
+                    if (selected) {
+                        Icon(
+                            Icons.Default.Check,
+                            contentDescription = null,
+                            tint = colors.primary,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
                 }
             }
-            item(SecondaryMode.McpSandbox) {
-                Column {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                targetMode = SecondaryMode.McpSandbox
-                            }
-                    ) {
-                        RadioButton(
-                            selected = targetMode == SecondaryMode.McpSandbox,
-                            onClick = {
-                                targetMode = SecondaryMode.McpSandbox
-                            }
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Text("MCP Sandbox")
-                            Text(
-                                "Run a chosen MCP sandbox group's model and tools on a double click & hold.",
-                                fontSize = 12.sp,
-                            )
-                        }
-                    }
-                    if (targetMode == SecondaryMode.McpSandbox) {
-                        sandboxGroups.forEach { group ->
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(start = 32.dp)
-                                    .clickable {
-                                        targetGroupId = group.id
-                                    }
-                            ) {
-                                RadioButton(
-                                    selected = targetGroupId == group.id,
-                                    onClick = {
-                                        targetGroupId = group.id
-                                    }
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(group.title)
-                            }
-                        }
-                    }
-                }
+            if (!localSupported) {
+                Text(
+                    "The Local LLM does not support MCP sandboxes. Set the default MCP " +
+                        "sandbox group's model to \"Index Agent\" to use it.",
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp),
+                )
             }
         }
     }
@@ -1471,12 +1415,13 @@ fun AuthorizedIntegrations(preferences: Preferences) {
 
     val platform = koinInject<Platform>()
 
-    // Calendar (Built-in only): the dot reflects whether calendar permission is granted; tapping
-    // it requests the permission. Permission is the "connection" for the built-in calendar account.
+    // Phone Calendar is an opt-in integration (Add integration → Phone Calendar). Its dot
+    // reflects whether calendar permission is granted; tapping re-requests a missing permission.
     val permissionRequester = koinInject<PermissionRequester>()
     val uiContext = rememberUiContext()
     val scope = rememberCoroutineScope()
     val calendarGranted by permissionRequester.granted(Permission.Calendar).collectAsState(false)
+    val phoneCalendarEnabled by preferences.phoneCalendarEnabled.collectAsState()
 
     Column(modifier = Modifier.fillMaxWidth()) {
         IntegrationItem(
@@ -1487,15 +1432,34 @@ fun AuthorizedIntegrations(preferences: Preferences) {
             selectedNoteProvider = currentNoteProvider == NoteProvider.Builtin,
             onSelectReminderProvider = { preferences.setReminderProvider(ReminderProvider.BuiltIn) },
             onSelectNoteProvider = { preferences.setNoteProvider(NoteProvider.Builtin) },
-            hasCalendar = true,
-            calendarGranted = calendarGranted,
-            onToggleCalendar = {
-                if (!calendarGranted) {
-                    val ctx = uiContext ?: return@IntegrationItem
-                    scope.launch { permissionRequester.requestPermission(Permission.Calendar, ctx) }
-                }
-            },
         )
+        if (phoneCalendarEnabled) {
+            var showPhoneCalendarConfig by remember { mutableStateOf(false) }
+            if (showPhoneCalendarConfig) {
+                PhoneCalendarConfigDialog(
+                    preferences = preferences,
+                    onDismiss = { showPhoneCalendarConfig = false }
+                )
+            }
+            IntegrationItem(
+                title = PHONE_CALENDAR_TITLE,
+                hasReminder = false,
+                hasNotes = false,
+                selectedReminderProvider = false,
+                selectedNoteProvider = false,
+                onSelectReminderProvider = {},
+                onSelectNoteProvider = {},
+                onConfigure = { showPhoneCalendarConfig = true },
+                hasCalendar = true,
+                calendarGranted = calendarGranted,
+                onToggleCalendar = {
+                    if (!calendarGranted) {
+                        val ctx = uiContext ?: return@IntegrationItem
+                        scope.launch { permissionRequester.requestPermission(Permission.Calendar, ctx) }
+                    }
+                },
+            )
+        }
         if (platform.isIOS) {
             IntegrationItem(
                 title = "iOS Reminders",
@@ -1561,6 +1525,27 @@ fun AuthorizedIntegrations(preferences: Preferences) {
                 onSelectNoteProvider = { preferences.setNoteProvider(NoteProvider.Tasker) }
             )
         }
+    }
+}
+
+/** Manage dialog for the opt-in Phone Calendar integration: disconnecting hides the row and
+ *  disables the agent's calendar tool. (The system permission itself stays granted.) */
+@Composable
+private fun PhoneCalendarConfigDialog(preferences: Preferences, onDismiss: () -> Unit) {
+    M3Dialog(
+        onDismissRequest = onDismiss,
+        title = { Text(PHONE_CALENDAR_TITLE) },
+        buttons = {
+            TextButton(
+                onClick = {
+                    preferences.setPhoneCalendarEnabled(false)
+                    onDismiss()
+                }
+            ) { Text("Disconnect") }
+            TextButton(onClick = onDismiss) { Text("Close") }
+        }
+    ) {
+        Text("Index can add events to your phone's calendar when you explicitly ask for a calendar event.")
     }
 }
 
@@ -1729,26 +1714,31 @@ private fun OutputTypeOption(
 @Composable
 fun IndexDeviceListItem(
     headline: String,
-    buttons: @Composable RowScope.() -> Unit,
+    supporting: String,
     modifier: Modifier = Modifier,
 ) {
-    Surface(modifier) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(8.dp)
+    val colors = IndexTheme.colors
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = modifier.padding(horizontal = 16.dp, vertical = 12.dp)
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(44.dp)
+                .border(2.dp, colors.outlineVariant, CircleShape)
         ) {
-            Image(
-                imageResource(UtilRes.drawable.ring_wireframe),
+            Icon(
+                Icons.Default.RadioButtonUnchecked,
                 contentDescription = null,
-                modifier = Modifier.size(110.dp)
+                tint = colors.onSurfaceVariant,
+                modifier = Modifier.size(22.dp)
             )
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(headline, style = MaterialTheme.typography.titleLarge)
-                Row {
-                    buttons()
-                }
-            }
+        }
+        Column {
+            Text(headline, fontSize = 16.sp, color = colors.onSurface)
+            Text(supporting, fontSize = 14.sp, color = colors.onSurfaceVariant)
         }
     }
 }
@@ -1757,15 +1747,6 @@ fun IndexDeviceListItem(
 @Composable
 fun PreviewDeviceListItem() {
     PreviewWrapper {
-        IndexDeviceListItem(
-            headline = "Pebble Index 0A1",
-            buttons = {
-                Button(
-                    onClick = {}
-                ) {
-                    Text("Unpair")
-                }
-            }
-        )
+        IndexDeviceListItem(headline = "Pebble Index 0A1", supporting = "Paired")
     }
 }

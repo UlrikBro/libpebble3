@@ -173,12 +173,25 @@ data class TimelineItemFields(
     val actions: List<BaseAction>,
 )
 
+// Sending an attribute a watch doesn't know is not harmless: firmware indexes a fixed-size array by
+// attribute id when it verifies an item, so an unknown id writes out of bounds.
+private val TimelineAttribute.requiredCapability: ProtocolCapsFlag?
+    get() = when (this) {
+        TimelineAttribute.VibrationPattern -> ProtocolCapsFlag.SupportsCustomVibePatterns
+        TimelineAttribute.ImageAspectRatio -> ProtocolCapsFlag.SupportsNotificationImages
+        else -> null
+    }
+
 interface DbTimelineItem : BlobDbItem {
     val itemId: Uuid
     val content: TimelineItemFields
     fun type(): TimelineItem.Type
 
-    override fun recordHashCode(): Int = content.hashCode()
+    // LastUpdated is a display-only freshness stamp; excluding it avoids re-syncing an
+    // otherwise-unchanged item (weather sets it to now on every fetch).
+    override fun recordHashCode(): Int =
+        content.copy(attributes = content.attributes.filterNot { it.attribute == TimelineAttribute.LastUpdated })
+            .hashCode()
     override fun key(): UByteArray = SUUID(StructMapper(), itemId).toBytes()
     override fun value(params: ValueParams): UByteArray? {
         val item = TimelineItem(
@@ -189,9 +202,8 @@ interface DbTimelineItem : BlobDbItem {
             type = type(),
             flags = TimelineItem.Flag.makeFlags(content.flags),
             layout = content.layout,
-            attributes = content.attributes.filterNot {
-                it.attribute == TimelineAttribute.VibrationPattern && !params.capabilities.contains(
-                    ProtocolCapsFlag.SupportsCustomVibePatterns)
+            attributes = content.attributes.filterNot { attr ->
+                attr.attribute.requiredCapability?.let { it !in params.capabilities } == true
             }.map { it.asAttribute() },
             actions = content.actions.map { it.asAction() },
         )

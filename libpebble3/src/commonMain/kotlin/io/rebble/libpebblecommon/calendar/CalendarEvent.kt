@@ -13,6 +13,9 @@ import io.rebble.libpebblecommon.util.trimWithEllipsis
 import kotlinx.datetime.DayOfWeek
 import kotlin.time.Instant
 import kotlinx.datetime.Month
+import kotlinx.datetime.TimeZone
+import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import kotlin.time.Duration
 import kotlin.uuid.Uuid
 
@@ -66,7 +69,7 @@ private fun transformDescription(rawDescription: String): String {
     return rawDescription.replace(regex, "").trimWithEllipsis(300)
 }
 
-fun CalendarEvent.toTimelineReminder(timestamp: Instant, pinUuid: Uuid): TimelineReminder =
+fun CalendarEvent.toTimelineReminder(timestamp: Instant, pinUuid: Uuid, vibePattern: List<UInt>? = null): TimelineReminder =
     buildTimelineReminder(
         parentId = pinUuid,
         timestamp = timestamp,
@@ -77,6 +80,7 @@ fun CalendarEvent.toTimelineReminder(timestamp: Instant, pinUuid: Uuid): Timelin
                 location { location }
             }
             tinyIcon { TimelineIcon.NotificationReminder }
+            vibePattern?.let { vibrationPattern { it } }
             // TODO attendees
         }
         flags {
@@ -300,7 +304,23 @@ data class EventRecurrenceRule(
 
 data class EventReminder(
     /**
-     * Minutes before the event when the reminder should trigger
+     * Minutes before the event when the reminder should trigger. Negative fires after the start
+     * (e.g. iOS birthday alerts, which are set for 9am on the day of a midnight-start event).
      */
     val minutesBefore: Int,
-)
+) {
+    companion object {
+        /**
+         * [offsetSeconds] is seconds from the event start, negative meaning before it (EventKit's
+         * `EKAlarm.relativeOffset` convention).
+         */
+        fun fromStartOffset(offsetSeconds: Double) = EventReminder(-(offsetSeconds.toInt() / 60))
+    }
+}
+
+/**
+ * The watch treats all-day timestamps as local wall-clock and applies the timezone offset itself,
+ * so all-day items must be anchored to UTC midnight of the local date.
+ */
+fun Instant.anchorAllDayToUtc(timeZone: TimeZone): Instant =
+    toLocalDateTime(timeZone).toInstant(TimeZone.UTC)

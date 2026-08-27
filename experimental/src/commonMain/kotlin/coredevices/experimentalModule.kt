@@ -15,6 +15,8 @@ import coredevices.ring.transcription.InferenceBoostProvider
 import coredevices.ring.transcription.NoOpInferenceBoostProvider
 import coredevices.util.transcription.CactusModelPathProvider
 import coredevices.ring.agent.AgentFactory
+import coredevices.ring.agent.DefaultCaptureType
+import coredevices.ring.agent.LLMLocationProvider
 import coredevices.ring.agent.IndexAgentNenya
 import coredevices.ring.agent.McpSandboxAgentNenya
 import coredevices.ring.agent.SearchAgentNenya
@@ -37,12 +39,14 @@ import coredevices.ring.api.NotionApi
 import coredevices.ring.audio.M4aEncoder
 import coredevices.ring.database.Preferences
 import coredevices.ring.database.PreferencesImpl
+import coredevices.ring.database.room.Migrate33To34
 import coredevices.ring.database.room.RingDatabase
 import coredevices.ring.database.room.repository.McpSandboxRepository
 import coredevices.ring.database.room.repository.RecordingProcessingTaskRepository
 import coredevices.ring.database.room.repository.ItemRepository
 import coredevices.ring.database.room.repository.ListRepository
 import coredevices.ring.database.room.repository.RecordingRepository
+import coredevices.ring.reminders.ReminderCompleter
 import coredevices.ring.reminders.ReminderDeepLinkResolver
 import coredevices.ring.service.indexfeed.DefaultListsBootstrap
 import coredevices.ring.service.indexfeed.IndexFeedSyncService
@@ -51,12 +55,14 @@ import coredevices.libindex.database.repository.RingTransferRepository
 import coredevices.ring.external.indexwebhook.IndexWebhookApi
 import coredevices.ring.external.indexwebhook.IndexWebhookApiImpl
 import coredevices.ring.external.indexwebhook.IndexWebhookPreferences
+import coredevices.ring.external.indexwebhook.IndexWebhookRunRepository
 import coredevices.ring.agent.integrations.obsidian.ObsidianPreferences
 import coredevices.ring.firestoreModule
 import coredevices.ring.mcpModule
 import coredevices.ring.service.FirestoreRingDebugDelegate
 import coredevices.ring.service.IndexButtonActionHandler
 import coredevices.ring.service.IndexButtonSequenceRecorder
+import coredevices.ring.service.button.GestureRoutingPreferences
 import coredevices.ring.service.IndexNotificationManager
 import coredevices.libindex.database.PrefsCollectionIndexStorage
 import coredevices.ring.agent.AgentNenya
@@ -77,7 +83,10 @@ import coredevices.ring.util.trace.RingTraceSession
 import coredevices.ring.util.trace.TraceSessionExporter
 import coredevices.ring.viewmodelModule
 import coredevices.util.CommonBuildKonfig
+import coredevices.ring.bugreport.IndexSettingsSummary
 import coredevices.util.PermissionRequester
+import coredevices.util.Platform
+import coredevices.util.isAndroid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
@@ -104,6 +113,7 @@ val experimentalModule = module {
     single {
         val builder: RoomDatabase.Builder<RingDatabase> = get()
         builder
+            .addMigrations(Migrate33To34(isAndroid = get<Platform>().isAndroid))
             .fallbackToDestructiveMigrationOnDowngrade(true)
             .setDriver(BundledSQLiteDriver())
             .setQueryCoroutineContext(Dispatchers.IO)
@@ -164,13 +174,20 @@ val experimentalModule = module {
     singleOf(::RecordingProcessingTaskRepository)
     single {
         val builtInReminders = get<BuiltInReminderIntegration>()
-        ItemRepository(get()) { builtInReminders.cancelReminder(it) }
+        ItemRepository(
+            get(),
+            cancelReminder = { builtInReminders.cancelReminder(it) },
+            rescheduleReminder = { id, recordingId, newTime ->
+                builtInReminders.rescheduleReminder(id, recordingId, newTime)
+            },
+        )
     }
     singleOf(::ListRepository)
     singleOf(::DefaultListsBootstrap)
     singleOf(::IndexFeedSyncService)
     singleOf(::ItemFactory)
     singleOf(::ReminderDeepLinkResolver)
+    singleOf(::ReminderCompleter)
     singleOf(::PreferencesImpl) binds arrayOf(Preferences::class, BasePreferences::class)
     singleOf(::RingTraceSession)
     singleOf(::TraceSessionExporter)
@@ -191,9 +208,12 @@ val experimentalModule = module {
     singleOf(::GoogleTasksApi)
     singleOf(::M4aEncoder)
     singleOf(::IndexWebhookPreferences)
+    singleOf(::IndexWebhookRunRepository)
+    singleOf(::GestureRoutingPreferences)
     singleOf(::ObsidianPreferences)
     single {
         IndexWebhookApiImpl(
+            get(),
             get(),
             get(),
             get(),
@@ -211,11 +231,13 @@ val experimentalModule = module {
     singleOf(::RingSync)
     singleOf(::IndexNotificationManager)
     singleOf(::RingPairing)
+    singleOf(::IndexSettingsSummary)
     singleOf(::ExperimentalDevices)
     singleOf(::PrefsCollectionIndexStorage) bind CollectionIndexStorage::class
     factory { HackyPermissionRequesterProvider { get<PermissionRequester>() } }
+    singleOf(::LLMLocationProvider)
     factory { p -> AgentNenya(get(), p.getOrNull() ?: "", p.getOrNull() ?: NenyaModel.Default, p.getOrNull() ?: emptyList()) }
-    factory { p -> IndexAgentNenya(get(), p.getOrNull() ?: emptyList()) }
+    factory { p -> IndexAgentNenya(get(), p.getOrNull() ?: emptyList(), p.getOrNull() ?: DefaultCaptureType.Note) }
     factory { p -> McpSandboxAgentNenya(get(), p.getOrNull() ?: NenyaModel.Default, p.getOrNull() ?: emptyList()) }
     factory { p -> SearchAgentNenya(get(), get(), get(), p.getOrNull() ?: emptyList()) }
     single { CactusModelProvider() }
@@ -229,8 +251,7 @@ val experimentalModule = module {
     singleOf(::RingHacksDelegate) bind KMPHaversineHacksDelegate::class
     singleOf(::McpSandboxRepository)
     singleOf(::BuiltinServletRepository) bind ServletRepository::class
-
-    factoryOf(::GTasksIntegration)
+    factory { GTasksIntegration(get()) }
     factoryOf(::UIEmailIntegration)
     single { createBuiltInReminderIntegration() }
     singleOf(::BuiltInReminderFeedItems)

@@ -10,6 +10,7 @@ import kotlinx.datetime.toInstant
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -22,10 +23,10 @@ class HumanDateTimeParserTest {
 
     // Fixed reference time: Wednesday, January 15, 2025 at 10:30 AM
     private val referenceDateTime = LocalDateTime(2025, 1, 15, 10, 30)
-    private val parser = HumanDateTimeParser(object : Clock {
-        override fun now(): kotlin.time.Instant {
-            return referenceDateTime.toInstant(TimeZone.UTC)
-        }
+    private val parser = parserAt(referenceDateTime)
+
+    private fun parserAt(reference: LocalDateTime) = HumanDateTimeParser(object : Clock {
+        override fun now(): kotlin.time.Instant = reference.toInstant(TimeZone.UTC)
     }, TimeZone.UTC)
 
     // ===== RELATIVE DURATION TESTS =====
@@ -608,6 +609,168 @@ class HumanDateTimeParserTest {
         assertEquals(LocalDateTime(2025, 1, 16, 21, 0), result.dateTime)
     }
 
+    @Test
+    fun testExplicitTimeBeatsTimeOfDayWord() {
+        val result = parser.parse("tomorrow morning at 7:45 a.m.")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 7, 45), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitTimeBeforeTimeOfDayWord() {
+        val result = parser.parse("at 7:45 tomorrow morning")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 7, 45), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitBareHourWithEvening() {
+        val result = parser.parse("tomorrow evening at 7")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 19, 0), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitBareHourWithMorning() {
+        val result = parser.parse("tomorrow morning at 8")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 8, 0), result.dateTime)
+    }
+
+    // ===== NAMED TIME TESTS =====
+
+    @Test
+    fun testAbsoluteTimeAtNoon() {
+        val result = parser.parse("at noon")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(12, 0), result.time)
+    }
+
+    @Test
+    fun testAbsoluteTimeAtMidnight() {
+        val result = parser.parse("at midnight")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(0, 0), result.time)
+    }
+
+    @Test
+    fun testAbsoluteDateTimeDayOfWeekAtNoon() {
+        val result = parser.parse("friday at noon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 17, 12, 0), result.dateTime)
+    }
+
+    @Test
+    fun testAbsoluteDateTimeTomorrowAtMidnight() {
+        val result = parser.parse("tomorrow at midnight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 0, 0), result.dateTime)
+    }
+
+    @Test
+    fun testAfternoonIsNotParsedAsNoon() {
+        val result = parser.parse("tomorrow afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 14, 0), result.dateTime)
+    }
+
+    @Test
+    fun testParseFromMessageDayOfWeekAtNoon() {
+        val result = parser.parseFromMessage("lunch with sarah at noon on friday")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(
+            LocalDateTime(2025, 1, 17, 12, 0),
+            (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime,
+        )
+        // normalizeTimeExpressions rewrites "noon" -> "12 pm", so the extracted text is normalized.
+        assertEquals("at 12 pm on friday", result.matchedText.lowercase())
+    }
+    
+    @Test
+    fun testBareTimeBeforeTimeOfDayWord() {
+        val result = parser.parse("5:30 this afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 17, 30), result.dateTime)
+    }
+
+    @Test
+    fun testBareTimeBeforeTomorrowMorningNotShiftedToPm() {
+        val result = parser.parse("7:45 tomorrow morning")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 7, 45), result.dateTime)
+    }
+
+    @Test
+    fun testBareHourBeforeTimeOfDayWord() {
+        val result = parser.parse("5 this evening")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 17, 0), result.dateTime)
+    }
+
+    @Test
+    fun testBareTimeWithAmPmBeforeTimeOfDayWord() {
+        val result = parser.parse("5:30 pm this afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 17, 30), result.dateTime)
+    }
+
+    @Test
+    fun testBareTwelveHourTimeBeforeTimeOfDayWordNotShifted() {
+        val result = parser.parse("12:30 this afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 12, 30), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekMorning() {
+        // Reference is Wednesday Jan 15, so next Saturday is Jan 18
+        val result = parser.parse("next saturday morning")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 18, 9, 0), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekMorningWithoutQualifier() {
+        val result = parser.parse("saturday morning")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 18, 9, 0), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekAfternoon() {
+        val result = parser.parse("on friday afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 17, 14, 0), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekEvening() {
+        val result = parser.parse("monday evening")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 20, 19, 0), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekNight() {
+        val result = parser.parse("sunday night")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 19, 21, 0), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitTimeBeatsDayOfWeekTimeOfDayWord() {
+        val result = parser.parse("saturday morning at 10 a.m.")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 18, 10, 0), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitBareHourWithDayOfWeekEvening() {
+        val result = parser.parse("saturday evening at 7")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 18, 19, 0), result.dateTime)
+    }
+
     // ===== ABSOLUTE DATE TESTS =====
 
     @Test
@@ -727,6 +890,67 @@ class HumanDateTimeParserTest {
     }
 
     @Test
+    fun testAbsoluteDateMonthDayOrdinalWord() {
+        val result = parser.parse("december twentieth")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 12, 20), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordOnes() {
+        val result = parser.parse("march first")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 3, 1), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordTeen() {
+        val result = parser.parse("june twelfth")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 6, 12), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordCompound() {
+        val result = parser.parse("august twenty third")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 8, 23), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordCompoundHyphenated() {
+        val result = parser.parse("december thirty-first")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 12, 31), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordWithYear() {
+        val result = parser.parse("march first, 2026")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2026, 3, 1), result.date)
+    }
+
+    @Test
+    fun testAbsoluteDateTimeMonthDayOrdinalWordAtTime() {
+        val result = parser.parse("december twentieth at 3pm")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 12, 20, 15, 0), result.dateTime)
+    }
+
+    @Test
+    fun testAbsoluteDateTimeTimeBeforeMonthDayOrdinalWord() {
+        val result = parser.parse("at 7pm on august twenty-first")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 8, 21, 19, 0), result.dateTime)
+    }
+
+    @Test
+    fun testAbsoluteDateMonthDayOrdinalWordInvalidCompound() {
+        assertNull(parser.parse("august twenty twentieth"))
+    }
+
+    @Test
     fun testAbsoluteDateWithExplicitYearDoesNotRollForward() {
         // January 10, 2025 is in the past but year is explicit — respect it
         val result = parser.parse("january 10, 2025")
@@ -776,10 +1000,7 @@ class HumanDateTimeParserTest {
     @Test
     fun testWeekendOnSaturdayBefore9amResolvesToSameDay() {
         // Today is Saturday and the default 9am reminder slot hasn't passed yet, so it stays today.
-        val saturdayReference = LocalDateTime(2025, 1, 18, 7, 30)
-        val saturdayParser = HumanDateTimeParser(object : Clock {
-            override fun now(): kotlin.time.Instant = saturdayReference.toInstant(TimeZone.UTC)
-        }, TimeZone.UTC)
+        val saturdayParser = parserAt(LocalDateTime(2025, 1, 18, 7, 30))
         val result = saturdayParser.parse("this weekend")
         assertIs<InterpretedDateTime.AbsoluteDate>(result)
         assertEquals(LocalDate(2025, 1, 18), result.date)
@@ -789,10 +1010,7 @@ class HumanDateTimeParserTest {
     fun testWeekendOnSaturdayAfter9amResolvesToNextSaturday() {
         // Today is Saturday and the default 9am slot has passed; resolving to today would yield a
         // past 9am the scheduler rejects, so it rolls to the next Saturday (Jan 25).
-        val saturdayReference = LocalDateTime(2025, 1, 18, 10, 30)
-        val saturdayParser = HumanDateTimeParser(object : Clock {
-            override fun now(): kotlin.time.Instant = saturdayReference.toInstant(TimeZone.UTC)
-        }, TimeZone.UTC)
+        val saturdayParser = parserAt(LocalDateTime(2025, 1, 18, 10, 30))
         val result = saturdayParser.parse("this weekend")
         assertIs<InterpretedDateTime.AbsoluteDate>(result)
         assertEquals(LocalDate(2025, 1, 25), result.date)
@@ -825,6 +1043,50 @@ class HumanDateTimeParserTest {
         // "this past weekend" is in the past — must not be extracted
         val result = parser.parseFromMessage("we went camping this past weekend")
         assertNull(result)
+    }
+
+    // ===== NEXT WEEK TESTS =====
+
+    @Test
+    fun testNextWeekResolvesToComingMonday() {
+        // Reference is Wednesday Jan 15, 2025, so the coming Monday is Jan 20
+        val result = parser.parse("next week")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 1, 20), result.date)
+    }
+
+    @Test
+    fun testNextWeekOnSundayResolvesToTheFollowingDay() {
+        val sundayParser = parserAt(LocalDateTime(2025, 1, 19, 10, 30))
+        val result = sundayParser.parse("next week")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 1, 20), result.date)
+    }
+
+    @Test
+    fun testNextWeekOnMondayResolvesToTheMondayAfter() {
+        // Today is already Monday, so "next week" means the Monday a week out, not today
+        val mondayParser = parserAt(LocalDateTime(2025, 1, 20, 10, 30))
+        val result = mondayParser.parse("next week")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result)
+        assertEquals(LocalDate(2025, 1, 27), result.date)
+    }
+
+    @Test
+    fun testParseFromMessageExtractsNextWeek() {
+        val result = parser.parseFromMessage("remind me to renew my passport next week")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result?.dateTime)
+        assertEquals(LocalDate(2025, 1, 20), (result?.dateTime as InterpretedDateTime.AbsoluteDate).date)
+        assertEquals("next week", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageNextWeekendStillResolvesToSaturday() {
+        // "next weekend" must not be shortened to a "next week" match
+        val result = parser.parseFromMessage("let's go camping next weekend")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result?.dateTime)
+        assertEquals(LocalDate(2025, 1, 25), (result?.dateTime as InterpretedDateTime.AbsoluteDate).date)
+        assertEquals("next weekend", result.matchedText.lowercase())
     }
 
     // ===== ABSOLUTE DATETIME TESTS =====
@@ -1026,6 +1288,21 @@ class HumanDateTimeParserTest {
     }
 
     @Test
+    fun testParseFromMessageExtractsMonthDayOrdinalWord() {
+        val result = parser.parseFromMessage("remind me on december twentieth to renew my passport")
+        assertIs<InterpretedDateTime.AbsoluteDate>(result?.dateTime)
+        assertEquals(LocalDate(2025, 12, 20), (result?.dateTime as InterpretedDateTime.AbsoluteDate).date)
+        assertEquals("on december twentieth", result.matchedText)
+    }
+
+    @Test
+    fun testParseFromMessageExtractsMonthDayOrdinalWordWithTime() {
+        val result = parser.parseFromMessage("dinner reservation february fourteenth at 7pm")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 2, 14, 19, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+    }
+
+    @Test
     fun testParseFromMessageExtractsMonthDayWithTime() {
         val result = parser.parseFromMessage("dinner reservation february 14 at 7pm")
         assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
@@ -1118,6 +1395,62 @@ class HumanDateTimeParserTest {
         assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
         assertEquals(LocalDateTime(2025, 1, 16, 9, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
         assertEquals("tomorrow morning", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExplicitTimeBeatsTimeOfDayWord() {
+        val result = parser.parseFromMessage("remind me tomorrow morning at 7:45 a.m. to grab earbuds")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 16, 7, 45), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("tomorrow morning at 7:45 a.m.", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExplicitBareHourAfterTimeOfDayWord() {
+        val result = parser.parseFromMessage("remind me tomorrow morning at 8 to stretch")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 16, 8, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("tomorrow morning at 8", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExplicitBareHourBeforeTimeOfDayWord() {
+        val result = parser.parseFromMessage("remind me at 8 tomorrow morning to stretch")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 16, 8, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("at 8 tomorrow morning", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageBareTimeBeforeTimeOfDayWord() {
+        val result = parser.parseFromMessage("remind me to go to acme 5:30 this afternoon")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 15, 17, 30), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("5:30 this afternoon", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageAtTimeWithMinutesBeforeTimeOfDayWord() {
+        val result = parser.parseFromMessage("remind me at 5:30 this afternoon to go to acme")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 15, 17, 30), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("at 5:30 this afternoon", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExtractsNextDayOfWeekMorning() {
+        val result = parser.parseFromMessage("remind me next saturday morning to look at unemployment")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 18, 9, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("next saturday morning", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExtractsDayOfWeekTimeOfDayWithExplicitTime() {
+        val result = parser.parseFromMessage("remind me to call grandpa on saturday morning at 10 a.m.")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(LocalDateTime(2025, 1, 18, 10, 0), (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime)
+        assertEquals("on saturday morning at 10 a.m.", result.matchedText.lowercase())
     }
 
     @Test
@@ -1364,5 +1697,444 @@ class HumanDateTimeParserTest {
         val result = parser.parse("a year")
         assertIs<InterpretedDateTime.Relative>(result)
         assertEquals(DatePeriod(years = 1), result.period)
+    }
+
+    // ===== WORD-SPELLED TIME TESTS =====
+    // Parakeet transcribes numbers as words ("eight PM" rather than "8 PM"),
+    // so the parser has to normalise those forms before its digit-based regexes can match.
+
+    @Test
+    fun testWordTimeBareHourPm() {
+        val result = parser.parse("eight pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(20, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeBareHourAm() {
+        val result = parser.parse("eleven am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(11, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeHourMinuteCompound() {
+        val result = parser.parse("seven fifty am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(7, 50), result.time)
+    }
+
+    @Test
+    fun testWordTimeHourMinuteTeens() {
+        val result = parser.parse("eight fifteen pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(20, 15), result.time)
+    }
+
+    @Test
+    fun testWordTimeTwoWordMinute() {
+        val result = parser.parse("seven forty five am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(7, 45), result.time)
+    }
+
+    @Test
+    fun testWordTimeNoAmPmDefaults24h() {
+        // "eleven thirty" without am/pm → interpreted as 11:30 (24h bare form)
+        val result = parser.parse("eleven thirty")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(11, 30), result.time)
+    }
+
+    @Test
+    fun testWordTimeAtHourTomorrow() {
+        val result = parser.parse("tomorrow at eight pm")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 20, 0), result.dateTime)
+    }
+
+    @Test
+    fun testWordTimeCompoundTomorrow() {
+        val result = parser.parse("tomorrow at seven fifty am")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 7, 50), result.dateTime)
+    }
+
+    @Test
+    fun testWordTimeNoon() {
+        val result = parser.parse("noon")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(12, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeMidnight() {
+        val result = parser.parse("midnight")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(0, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeOclock() {
+        val result = parser.parse("eight o'clock pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(20, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeHalfPast() {
+        val result = parser.parse("half past seven pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(19, 30), result.time)
+    }
+
+    @Test
+    fun testWordTimeQuarterPast() {
+        val result = parser.parse("quarter past eight am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(8, 15), result.time)
+    }
+
+    @Test
+    fun testWordTimeQuarterTo() {
+        val result = parser.parse("quarter to eight pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(19, 45), result.time)
+    }
+
+    @Test
+    fun testWordTimeQuarterToWrapAround() {
+        // "quarter to one" = 12:45 (since hour - 1 = 0 → wrap to 12)
+        val result = parser.parse("quarter to one pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(12, 45), result.time)
+    }
+
+    @Test
+    fun testWordTimeInTheMorning() {
+        val result = parser.parse("eight in the morning")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(8, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeInTheEvening() {
+        val result = parser.parse("seven in the evening")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(19, 0), result.time)
+    }
+
+    @Test
+    fun testWordTimeAtNight() {
+        val result = parser.parse("eleven at night")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(23, 0), result.time)
+    }
+
+    // ===== REGRESSION GUARDS =====
+    // Ensure the word-number normaliser doesn't break existing duration parsing.
+
+    @Test
+    fun testWordTimeDoesNotMangleDurationMinutes() {
+        // "fifteen minutes" — "fifteen" is a minute word but only preceded by no hour word,
+        // so the compound regex won't fire. Duration path via parseQuantifier still works.
+        val result = parser.parse("in fifteen minutes")
+        assertIs<InterpretedDateTime.Relative>(result)
+        assertEquals(15.minutes, result.duration)
+    }
+
+    @Test
+    fun testWordTimeDoesNotMangleDurationHours() {
+        // "two" has no adjacent time context, so it stays a word and parses as a quantifier
+        val result = parser.parse("in two hours")
+        assertIs<InterpretedDateTime.Relative>(result)
+        assertEquals(2.hours, result.duration)
+    }
+
+    @Test
+    fun testWordTimeDoesNotMangleThirtyMinutesDuration() {
+        val result = parser.parse("thirty minutes")
+        assertIs<InterpretedDateTime.Relative>(result)
+        assertEquals(30.minutes, result.duration)
+    }
+
+    // ===== SPOKEN DIGIT / MIXED TIME TESTS =====
+    // STT engines also render spoken times as space-separated digits ("9 15 a.m.")
+    // or mixed digit/word forms ("9 fifteen", "nine 15").
+
+    @Test
+    fun testDigitSpaceMinutesWithDottedAmPm() {
+        val result = parser.parse("9 15 a.m.")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(9, 15), result.time)
+    }
+
+    @Test
+    fun testDigitSpaceMinutesTomorrow() {
+        val result = parser.parse("tomorrow at 9 15 a.m.")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 9, 15), result.dateTime)
+    }
+
+    @Test
+    fun testDigitSpaceMinutesPm() {
+        val result = parser.parse("10 30 pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(22, 30), result.time)
+    }
+
+    @Test
+    fun testSpelledHourTomorrow() {
+        val result = parser.parse("tomorrow at nine am")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 9, 0), result.dateTime)
+    }
+
+    @Test
+    fun testMixedDigitHourWordMinute() {
+        val result = parser.parse("9 fifteen pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(21, 15), result.time)
+    }
+
+    @Test
+    fun testMixedWordHourDigitMinute() {
+        val result = parser.parse("nine 15 pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(21, 15), result.time)
+    }
+
+    @Test
+    fun testOhMinutesWords() {
+        val result = parser.parse("nine oh five pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(21, 5), result.time)
+    }
+
+    @Test
+    fun testOhMinutesDigits() {
+        val result = parser.parse("9 oh 5 am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(9, 5), result.time)
+    }
+
+    @Test
+    fun testMinuteWordsPastHour() {
+        val result = parser.parse("twenty past nine am")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(9, 20), result.time)
+    }
+
+    @Test
+    fun testMinuteWordsToHour() {
+        val result = parser.parse("ten to five pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(16, 50), result.time)
+    }
+
+    @Test
+    fun testAtDigitSpaceMinutes() {
+        val result = parser.parse("at 9 15")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(9, 15), result.time)
+    }
+
+    @Test
+    fun testAtSpelledBareHour() {
+        val result = parser.parse("at eight")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(8, 0), result.time)
+    }
+
+    @Test
+    fun testDigitPairWithoutTimeContextNotATime() {
+        assertNull(parser.parse("flight 9 15"))
+    }
+
+    @Test
+    fun testDigitRangePhraseNotRewritten() {
+        // "5 to 9 pm" is a range, not "8:55 pm"
+        assertNull(parser.parse("5 to 9 pm"))
+    }
+
+    @Test
+    fun testSpelledDayOfMonthStillParsesAfterHourRewrites() {
+        val result = parser.parse("august twenty one at 9 15 am")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 8, 21, 9, 15), result.dateTime)
+    }
+
+    @Test
+    fun testParseFromMessageExtractsDigitSpaceMinutes() {
+        val result = parser.parseFromMessage("remind me tomorrow at 9 15 a.m. to call my car insurance")
+        assertNotNull(result)
+        // Normalization rewrote the message, so matchedText refers to the normalized text
+        assertEquals("tomorrow at 9:15 a.m.", result.matchedText)
+        val dateTime = result.dateTime
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(dateTime)
+        assertEquals(LocalDateTime(2025, 1, 16, 9, 15), dateTime.dateTime)
+    }
+
+    @Test
+    fun testParseFromMessageExtractsSpokenEveningTime() {
+        val result = parser.parseFromMessage("remind me tomorrow at eight pm to take out the trash")
+        assertNotNull(result)
+        val dateTime = result.dateTime
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(dateTime)
+        assertEquals(LocalDateTime(2025, 1, 16, 20, 0), dateTime.dateTime)
+    }
+
+    @Test
+    fun testParseFromMessageDigitPairBeforeUnrelatedWordNotATime() {
+        assertNull(parser.parseFromMessage("the plan costs 9 30 a month"))
+    }
+
+    @Test
+    fun testQuarterToNoon() {
+        val result = parser.parse("quarter to noon")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(11, 45), result.time)
+    }
+
+    @Test
+    fun testQuarterToMidnight() {
+        val result = parser.parse("quarter to midnight")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(23, 45), result.time)
+    }
+
+    @Test
+    fun testOnesMinutePastHour() {
+        val result = parser.parse("five past nine pm")
+        assertIs<InterpretedDateTime.AbsoluteTime>(result)
+        assertEquals(LocalTime(21, 5), result.time)
+    }
+
+    @Test
+    fun testWordRangeWithoutAnchorNotATime() {
+        assertNull(parser.parse("ten to twelve"))
+    }
+
+    @Test
+    fun testMinuteInsideLongerWordNotRewritten() {
+        assertNull(parser.parse("on behalf of eleven employees"))
+    }
+
+    @Test
+    fun testMinuteInsideLongerNumberNotRewritten() {
+        assertNull(parser.parse("flight 115 past 9"))
+    }
+
+    @Test
+    fun testTomorrowAtBareDigitHour() {
+        val result = parser.parse("tomorrow at 8")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 8, 0), result.dateTime)
+    }
+
+    @Test
+    fun testTomorrowAtBareWordHour() {
+        val result = parser.parse("tomorrow at eight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 8, 0), result.dateTime)
+    }
+
+    @Test
+    fun testDayOfWeekAtBareHour() {
+        val result = parser.parse("friday at ten")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 17, 10, 0), result.dateTime)
+    }
+    // ===== "TONIGHT" TESTS =====
+
+    @Test
+    fun testTonightAlone() {
+        val result = parser.parse("tonight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 21, 0), result.dateTime)
+    }
+
+    @Test
+    fun testExplicitTimeBeforeTonight() {
+        val result = parser.parse("8 p.m. tonight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 20, 0), result.dateTime)
+    }
+
+    @Test
+    fun testAtExplicitTimeBeforeTonight() {
+        val result = parser.parse("at 8 p.m. tonight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 20, 0), result.dateTime)
+    }
+
+    @Test
+    fun testTonightAtExplicitTime() {
+        val result = parser.parse("tonight at 8 p.m.")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 20, 0), result.dateTime)
+    }
+
+    @Test
+    fun testTonightAtBareHourShiftsToPm() {
+        val result = parser.parse("tonight at 8")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 20, 0), result.dateTime)
+    }
+
+    @Test
+    fun testTonightWithMinutes() {
+        val result = parser.parse("tonight at 8:30")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 20, 30), result.dateTime)
+    }
+
+    @Test
+    fun testLaterTonight() {
+        val result = parser.parse("later tonight")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 15, 21, 0), result.dateTime)
+    }
+
+    @Test
+    fun testTomorrowNightNotTreatedAsTonight() {
+        val result = parser.parse("tomorrow night")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result)
+        assertEquals(LocalDateTime(2025, 1, 16, 21, 0), result.dateTime)
+    }
+
+    @Test
+    fun testParseFromMessageExtractsExplicitTimeBeforeTonight() {
+        val result = parser.parseFromMessage(
+            "remind me to take the sheets off the bed and prepare for the mattress delivery at 8 p.m. tonight"
+        )
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(
+            LocalDateTime(2025, 1, 15, 20, 0),
+            (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime
+        )
+        assertEquals("at 8 p.m. tonight", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExtractsTonightAtBareHour() {
+        val result = parser.parseFromMessage("remind me tonight at 8 to take the bins out")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(
+            LocalDateTime(2025, 1, 15, 20, 0),
+            (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime
+        )
+        assertEquals("tonight at 8", result.matchedText.lowercase())
+    }
+
+    @Test
+    fun testParseFromMessageExtractsBareTonight() {
+        val result = parser.parseFromMessage("remind me tonight to take the bins out")
+        assertIs<InterpretedDateTime.AbsoluteDateTime>(result?.dateTime)
+        assertEquals(
+            LocalDateTime(2025, 1, 15, 21, 0),
+            (result?.dateTime as InterpretedDateTime.AbsoluteDateTime).dateTime
+        )
+        assertEquals("tonight", result.matchedText.lowercase())
     }
 }

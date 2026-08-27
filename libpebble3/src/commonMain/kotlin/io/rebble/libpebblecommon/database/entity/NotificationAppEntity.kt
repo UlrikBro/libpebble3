@@ -60,6 +60,9 @@ data class NotificationAppItem(
     val iconCode: String?,
     @ColumnInfo(defaultValue = "0")
     val allowDuplicates: Boolean = false,
+    /** Send the photo attached to this app's notifications, when there is one. */
+    @ColumnInfo(defaultValue = "1")
+    val sendImages: Boolean = true,
     @ColumnInfo(defaultValue = "0")
     val isSystemApp: Boolean = false,
     /**
@@ -69,6 +72,8 @@ data class NotificationAppItem(
      */
     @ColumnInfo(defaultValue = "0")
     val autoAdded: Boolean = false,
+    @ColumnInfo(defaultValue = "0")
+    val rulesUpdated: MillisecondInstant = Instant.fromEpochSeconds(0).asMillisecond(),
 ) : BlobDbItem {
     override fun key(): UByteArray =
         SFixedString(StructMapper(), packageName.length, packageName).toBytes()
