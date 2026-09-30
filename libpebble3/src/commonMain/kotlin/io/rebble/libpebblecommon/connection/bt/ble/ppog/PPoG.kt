@@ -160,10 +160,16 @@ class PPoG(
     }
 
     private suspend fun sendResetComplete(version: PPoGVersion) {
+        // The RX window offered here is the most packets the watch may have in flight to us, so
+        // BleConfig can lower it below the platform default.
+        val offeredRxWindow = min(
+            min(blePlatformConfig.desiredRxWindow, bleConfig.value.maxPpogRxWindow ?: MAX_SUPPORTED_WINDOW_SIZE),
+            MAX_SUPPORTED_WINDOW_SIZE,
+        )
         sendPacketImmediately(
             packet = PPoGPacket.ResetComplete(
                 sequence = 0,
-                rxWindow = min(blePlatformConfig.desiredRxWindow, MAX_SUPPORTED_WINDOW_SIZE),
+                rxWindow = offeredRxWindow,
                 txWindow = min(blePlatformConfig.desiredTxWindow, MAX_SUPPORTED_WINDOW_SIZE),
             ),
             version = version,
@@ -192,6 +198,26 @@ class PPoG(
         var timeoutJob: Job? = null
         var lastSentAck: PPoGPacket.Ack? = null
         var lastReceivedAck: PPoGPacket.Ack? = null
+
+        // The watch rolls back and re-sends its whole in-flight window when a packet goes
+        // unacknowledged for 2-3 s (PebbleOS ppogatt.c), and PebbleOS v4.38 can assert in NimBLE
+        // (ble_att_cmd.c:96) and reboot while re-sending. So nothing may hold an ACK back:
+        //  - ACKs go out before the payload is passed on. Accepted payloads reach the Pebble
+        //    Protocol stream from their own coroutine, so a slow consumer upstream never delays
+        //    an ACK. A PPoG ACK only says the transport has the bytes; protocols that need
+        //    "stored" (DataLogging) acknowledge that separately.
+        //  - Inbound packets are taken before outbound work, and again after every outbound
+        //    packet: each send waits for the platform's send callback (onNotificationSent on
+        //    Android), so a queue of outbound packets used to delay ACKs by one callback each.
+        // Every packet is still ACKed on its own, as before. Coalescing would save little at the
+        // small windows this is meant for (half of a window of 2 is 1).
+        val inboundPayloads = Channel<ByteArray>(Channel.UNLIMITED)
+        scope.launch {
+            for (payload in inboundPayloads) {
+                pebbleProtocolStreams.inboundPPBytes.writeByteArray(payload)
+                pebbleProtocolStreams.inboundPPBytes.flush()
+            }
+        }
 
         fun cancelTimeout() {
             timeoutJob?.cancel()
@@ -230,88 +256,109 @@ class PPoG(
             }
         }
 
-        while (true) {
-            if (closed) return
-            select {
-                onTimeout.onReceive {
-                    resendInflightPackets()
+        suspend fun handleInbound(bytes: ByteArray) {
+            val packet = bytes.asPPoGPacket()
+            verboseLog { "received packet: $packet" }
+            when (packet) {
+                is PPoGPacket.Ack -> {
+                    removeResendsUpTo(packet.sequence)
+                    if (packet == lastReceivedAck) {
+                        logger.w("Received duplicate ACK; resending inflight packets")
+                        resendInflightPackets()
+                    }
+                    // TODO remove resends of this packet from send queue (+ also remove up-to-them, which OG code didn't do?)
+
+                    // Remove from in-flight packets, up until (including) this packet
+                    // TODO warn if we don't have that packet inflight?
+                    while (true) {
+                        val inflightPacket = inflightPackets.removeFirstOrNull() ?: break
+                        if (inflightPacket.packet.sequence == packet.sequence) break
+                    }
+                    if (inflightPackets.isEmpty()) {
+                        cancelTimeout()
+                    }
+                    lastReceivedAck = packet
                 }
-                pebbleProtocolStreams.outboundPPBytes.onReceive { bytes ->
-                    bytes.asList().chunked(maxDataBytes())
-                        .map { chunk ->
-                            PacketToSend(
-                                packet = PPoGPacket.Data(
-                                    sequence = outboundSequence.getThenIncrement(),
-                                    data = chunk.toByteArray()
-                                ),
-                                attemptCount = 0,
-                            )
-                        }
-                        .forEach {
-                            outboundDataQueue.addLast(it)
-                        }
-                }
-                pPoGStream.inboundPPoGBytesChannel.onReceive { bytes ->
-                    val packet = bytes.asPPoGPacket()
-                    verboseLog { "received packet: $packet" }
-                    when (packet) {
-                        is PPoGPacket.Ack -> {
-                            removeResendsUpTo(packet.sequence)
-                            if (packet == lastReceivedAck) {
-                                logger.w("Received duplicate ACK; resending inflight packets")
-                                resendInflightPackets()
-                            }
-                            // TODO remove resends of this packet from send queue (+ also remove up-to-them, which OG code didn't do?)
 
-                            // Remove from in-flight packets, up until (including) this packet
-                            // TODO warn if we don't have that packet inflight?
-                            while (true) {
-                                val inflightPacket = inflightPackets.removeFirstOrNull() ?: break
-                                if (inflightPacket.packet.sequence == packet.sequence) break
-                            }
-                            if (inflightPackets.isEmpty()) {
-                                cancelTimeout()
-                            }
-                            lastReceivedAck = packet
-                        }
-
-                        is PPoGPacket.Data -> {
-                            if (packet.sequence != inboundSequence.get()) {
-                                logger.w("data out of sequence; resending last ack")
-                                lastSentAck?.let { sendPacketImmediately(it, params.pPoGversion) }
-                            } else {
-                                pebbleProtocolStreams.inboundPPBytes.writeByteArray(packet.data)
-                                pebbleProtocolStreams.inboundPPBytes.flush()
-                                inboundSequence.increment()
-                                // TODO coalesced ACKing
-                                lastSentAck = PPoGPacket.Ack(sequence = packet.sequence)
-                                    .also { sendPacketImmediately(it, params.pPoGversion) }
-                            }
-                        }
-
-                        // Always logged: the watch sends these when its ack timeouts have run out,
-                        // so they are the phone-side marker of a watch reset storm.
-                        is PPoGPacket.ResetComplete -> {
-                            logger.w("in-session $packet from watch; tearing down PPoG session")
-                            throw IllegalStateException("We don't handle resetting PPoG - disconnect and reconnect")
-                        }
-
-                        is PPoGPacket.ResetRequest -> {
-                            logger.w("in-session $packet from watch; tearing down PPoG session")
-                            throw IllegalStateException("We don't handle resetting PPoG - disconnect and reconnect")
-                        }
+                is PPoGPacket.Data -> {
+                    if (packet.sequence != inboundSequence.get()) {
+                        logger.w("data out of sequence; resending last ack")
+                        lastSentAck?.let { sendPacketImmediately(it, params.pPoGversion) }
+                    } else {
+                        // Never fails: the channel is unlimited and only closed on exit.
+                        inboundPayloads.trySend(packet.data)
+                        inboundSequence.increment()
+                        lastSentAck = PPoGPacket.Ack(sequence = packet.sequence)
+                            .also { sendPacketImmediately(it, params.pPoGversion) }
                     }
                 }
-            }
 
-            // Drain send queue
-            while (inflightPackets.size < params.txWindow && !outboundDataQueue.isEmpty()) {
-                if (closed) return
-                val packet = outboundDataQueue.removeFirst()
-                sendPacketImmediately(packet.packet, params.pPoGversion)
-                rescheduleTimeout()
-                inflightPackets.add(packet)
+                // Always logged: the watch sends these when its ack timeouts have run out,
+                // so they are the phone-side marker of a watch reset storm.
+                is PPoGPacket.ResetComplete -> {
+                    logger.w("in-session $packet from watch; tearing down PPoG session")
+                    throw IllegalStateException("We don't handle resetting PPoG - disconnect and reconnect")
+                }
+
+                is PPoGPacket.ResetRequest -> {
+                    logger.w("in-session $packet from watch; tearing down PPoG session")
+                    throw IllegalStateException("We don't handle resetting PPoG - disconnect and reconnect")
+                }
             }
+        }
+
+        // Handles [first] (if any) and everything else that has already arrived.
+        suspend fun processInbound(first: ByteArray?) {
+            first?.let { handleInbound(it) }
+            while (true) {
+                val next = pPoGStream.inboundPPoGBytesChannel.tryReceive().getOrNull() ?: break
+                handleInbound(next)
+            }
+        }
+
+        try {
+            while (true) {
+                if (closed) return
+                // select is biased to its first clause: inbound packets, and so ACKs, are
+                // never kept waiting behind a timeout or new outbound data in the same pass.
+                select {
+                    pPoGStream.inboundPPoGBytesChannel.onReceive { bytes ->
+                        processInbound(bytes)
+                    }
+                    onTimeout.onReceive {
+                        resendInflightPackets()
+                    }
+                    pebbleProtocolStreams.outboundPPBytes.onReceive { bytes ->
+                        bytes.asList().chunked(maxDataBytes())
+                            .map { chunk ->
+                                PacketToSend(
+                                    packet = PPoGPacket.Data(
+                                        sequence = outboundSequence.getThenIncrement(),
+                                        data = chunk.toByteArray()
+                                    ),
+                                    attemptCount = 0,
+                                )
+                            }
+                            .forEach {
+                                outboundDataQueue.addLast(it)
+                            }
+                    }
+                }
+
+                // Drain send queue, acknowledging whatever the watch sent meanwhile after each
+                // packet (see above).
+                while (inflightPackets.size < params.txWindow && !outboundDataQueue.isEmpty()) {
+                    if (closed) return
+                    val packet = outboundDataQueue.removeFirst()
+                    sendPacketImmediately(packet.packet, params.pPoGversion)
+                    rescheduleTimeout()
+                    inflightPackets.add(packet)
+                    processInbound(null)
+                }
+            }
+        } finally {
+            // Lets the delivery coroutine hand over what it already holds, then end.
+            inboundPayloads.close()
         }
     }
 

@@ -114,8 +114,32 @@ data class CustomDataLoggingEvent(
     }
 }
 
+/**
+ * How the watch is answered for a [CustomDataLoggingEvent].
+ *
+ * There is deliberately no NACK. The firmware counts NACKs per session, reopens and
+ * re-sends at once, and on the 21st NACK since the session's last data ACK discards
+ * everything buffered for it; the count survives timeouts and reconnects. A few seconds
+ * of failed writes would cost the watch's whole backlog.
+ */
+enum class CustomDataLoggingResult {
+    /** The item is durable; the watch deletes it. */
+    ACK,
+
+    /**
+     * Not stored: no reply is sent. The watch times out after 30 s, keeps the item and
+     * re-sends it later, with no limit: at a 5-min check once 8 KB is buffered, at the
+     * 15-min forced flush, or after a reconnect.
+     */
+    RETRY_LATER,
+}
+
 fun interface CustomDataLoggingSink {
-    suspend fun onData(event: CustomDataLoggingEvent)
+    /**
+     * Called before the watch is answered: return [CustomDataLoggingResult.ACK] only once
+     * [event] is durable, and return well within the watch's 30 s reply timeout.
+     */
+    suspend fun onData(event: CustomDataLoggingEvent): CustomDataLoggingResult
 }
 
 interface CustomDataLogging {

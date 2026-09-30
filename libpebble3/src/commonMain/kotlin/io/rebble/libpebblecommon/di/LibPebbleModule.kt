@@ -529,7 +529,8 @@ fun initKoin(
                     scopedOf(::AppFetchService)
                     scopedOf(::TimelineService)
                     scopedOf(::AppMessageService)
-                    scopedOf(::DataLoggingService)
+                    // Explicit: `scopedOf` would also try to resolve the optional TimeSource.
+                    scoped { DataLoggingService(get(), get(), get()) }
                     scopedOf(::LogDumpService)
                     scopedOf(::GetBytesService)
                     scopedOf(::PhoneControlService)

@@ -25,10 +25,12 @@ compose.resources {
 val ideSync = providers.systemProperty("idea.sync.active").orNull.toBoolean()
 
 kotlin {
-    val xcodeExists = providers.exec {
-        isIgnoreExitValue = true
-        commandLine("which", "xcode-select")
-    }.result.get().exitValue == 0
+    // Only macOS has Xcode, and `which` does not exist on Windows at all.
+    val xcodeExists = System.getProperty("os.name").contains("mac", ignoreCase = true) &&
+        providers.exec {
+            isIgnoreExitValue = true
+            commandLine("which", "xcode-select")
+        }.result.get().exitValue == 0
     val xcodeDir = if (xcodeExists) {
         providers.exec {
             commandLine("xcode-select", "-p")

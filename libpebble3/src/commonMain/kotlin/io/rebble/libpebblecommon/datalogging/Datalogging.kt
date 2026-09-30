@@ -4,9 +4,9 @@ import co.touchlab.kermit.Logger
 import io.rebble.libpebblecommon.SystemAppIDs.SYSTEM_APP_UUID
 import io.rebble.libpebblecommon.connection.CustomDataLogging
 import io.rebble.libpebblecommon.connection.CustomDataLoggingEvent
+import io.rebble.libpebblecommon.connection.CustomDataLoggingResult
 import io.rebble.libpebblecommon.connection.CustomDataLoggingSink
 import io.rebble.libpebblecommon.connection.WebServices
-import io.rebble.libpebblecommon.di.LibPebbleCoroutineScope
 import io.rebble.libpebblecommon.services.WatchInfo
 import io.rebble.libpebblecommon.structmapper.SBytes
 import io.rebble.libpebblecommon.structmapper.SUInt
@@ -14,18 +14,25 @@ import io.rebble.libpebblecommon.structmapper.StructMappable
 import io.rebble.libpebblecommon.util.DataBuffer
 import io.rebble.libpebblecommon.util.Endian
 import kotlinx.coroutines.channels.BufferOverflow
-import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.launch
 import kotlin.concurrent.atomics.AtomicReference
 import kotlin.uuid.Uuid
+
+/** What [io.rebble.libpebblecommon.services.DataLoggingService] sends back for a data item. */
+enum class DataLoggingReply {
+    ACK,
+
+    /** No reply: the watch times out, keeps the item and re-sends it later. */
+    NONE,
+}
 
 class Datalogging(
     private val webServices: WebServices,
     private val healthDataProcessor: HealthDataProcessor,
-    libPebbleScope: LibPebbleCoroutineScope,
 ) : CustomDataLogging {
     private val logger = Logger.withTag("Datalogging")
 
@@ -36,29 +43,21 @@ class Datalogging(
         )
     override val customData: SharedFlow<CustomDataLoggingEvent> = _customData.asSharedFlow()
     private val sinkRef = AtomicReference<CustomDataLoggingSink?>(null)
-    private val sinkChannel =
-        Channel<CustomDataLoggingEvent>(
-            capacity = SINK_CHANNEL_CAPACITY,
-            onBufferOverflow = BufferOverflow.SUSPEND,
-        )
-
-    init {
-        libPebbleScope.launch {
-            for (event in sinkChannel) {
-                val sink = sinkRef.load() ?: continue
-                try {
-                    sink.onData(event)
-                } catch (e: Throwable) {
-                    logger.e(e) { "Sink threw for tag=${event.tag} uuid=${event.appUuid}" }
-                }
-            }
-        }
-    }
 
     override fun setDataSink(sink: CustomDataLoggingSink?) {
         sinkRef.store(sink)
     }
 
+    /**
+     * With a sink registered, custom data goes to it inline, so the ACK is sent only after the
+     * sink has handled it; queueing it and ACKing first lost the data on process death or a
+     * failed write. A sink that throws, or [CustomDataLoggingResult.RETRY_LATER], means no reply
+     * at all, never a NACK (see [CustomDataLoggingResult]). An item is emitted on [customData]
+     * once it has been accepted, so collectors do not see the watch's re-sends of a refused one.
+     *
+     * With no sink, [customData] is the only consumer and nothing can refuse an item, so it is
+     * emitted and ACKed as before.
+     */
     suspend fun logData(
         sessionId: UByte,
         uuid: Uuid,
@@ -67,11 +66,11 @@ class Datalogging(
         watchInfo: WatchInfo,
         itemSize: UShort,
         itemsLeft: UInt,
-    ) {
+    ): DataLoggingReply {
         // Handle health tags
         if (tag in HealthDataProcessor.HEALTH_TAGS) {
             healthDataProcessor.handleSendDataItems(sessionId, data, itemsLeft)
-            return
+            return DataLoggingReply.ACK
         }
 
         // Handle system-app datalogging tags
@@ -96,7 +95,7 @@ class Datalogging(
                     val size = itemSize.toInt()
                     if (size <= 0) {
                         logger.w { "Analytics heartbeat with itemSize=$size; ignoring" }
-                        return
+                        return DataLoggingReply.ACK
                     }
                     var offset = 0
                     while (offset + size <= data.size) {
@@ -106,7 +105,7 @@ class Datalogging(
                     }
                 }
             }
-            return
+            return DataLoggingReply.ACK
         }
         val event =
             CustomDataLoggingEvent(
@@ -118,10 +117,26 @@ class Datalogging(
                 itemsLeft = itemsLeft,
             )
 
-        if (sinkRef.load() != null) {
-            sinkChannel.send(event)
+        val sink = sinkRef.load()
+        val reply = if (sink == null) {
+            DataLoggingReply.ACK
+        } else {
+            try {
+                when (sink.onData(event)) {
+                    CustomDataLoggingResult.ACK -> DataLoggingReply.ACK
+                    CustomDataLoggingResult.RETRY_LATER -> DataLoggingReply.NONE
+                }
+            } catch (e: Throwable) {
+                // Only this collector's own cancellation propagates. A stray
+                // CancellationException from the sink (a timeout, say) would otherwise end
+                // DataLogging for the rest of the connection.
+                currentCoroutineContext().ensureActive()
+                logger.e(e) { "Sink threw for tag=$tag uuid=$uuid; not replying" }
+                DataLoggingReply.NONE
+            }
         }
-        _customData.tryEmit(event)
+        if (reply == DataLoggingReply.ACK) _customData.tryEmit(event)
+        return reply
     }
 
     fun openSession(
@@ -147,7 +162,6 @@ class Datalogging(
     companion object {
         private val MEMFAULT_CHUNKS_TAG: UInt = 86u
         private val ANALYTICS_HEARTBEAT_TAG: UInt = 87u
-        private const val SINK_CHANNEL_CAPACITY = 256
         private const val BUFFER_CAPACITY = 256
     }
 }

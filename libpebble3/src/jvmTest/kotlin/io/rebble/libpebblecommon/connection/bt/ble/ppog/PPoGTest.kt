@@ -25,9 +25,12 @@ class PPoGTest {
     private val ppStreams = PebbleProtocolStreams()
     private val ppogStreams = PPoGStream()
     private val outboundPPoGPackets = Channel<ByteArray>(capacity = 100)
+    /** Runs after each packet the phone sends, to simulate what arrives meanwhile. */
+    private var onSend: suspend (PPoGPacket) -> Unit = {}
     private val sender = object : PPoGPacketSender {
         override suspend fun sendPacket(packet: ByteArray): Boolean {
             outboundPPoGPackets.send(packet)
+            onSend(packet.asPPoGPacket())
             return true
         }
 
@@ -183,6 +186,59 @@ class PPoGTest {
 //        assertOutboundPPoGData(sequence = 0, data = outboundBytes0)
 //        assertOutboundPPoGData(sequence = 2, data = outboundBytes2)
 //    }
+
+    @Test
+    fun offeredRxWindowHonoursBleConfigLimit() = runTest {
+        val scope = ConnectionCoroutineScope(backgroundScope.coroutineContext)
+        val limited = BleConfig(maxPpogRxWindow = 2).asFlow()
+        ppog = PPoG(ppStreams, ppogStreams, sender, limited, blePlatformConfig, scope)
+        ppog.run(false)
+        receivePacket(PPoGPacket.ResetRequest(sequence = 0, ppogVersion = PPoGVersion.ONE))
+        assertOutboundPPoGPacket(PPoGPacket.ResetComplete(sequence = 0, rxWindow = 2, txWindow = 20))
+    }
+
+    @Test
+    fun dataArrivingWhileSendingIsAckedBeforeTheNextOutboundPacket() = runTest {
+        val scope = ConnectionCoroutineScope(backgroundScope.coroutineContext)
+        ppog = PPoG(ppStreams, ppogStreams, sender, bleConfigFlow, blePlatformConfig, scope)
+        ppog.run(false)
+        init()
+
+        // The watch's packet lands while the phone is sending the first of three.
+        val inbound0 = ppogDataPacket(0)
+        var injected = false
+        onSend = { sent ->
+            if (!injected && sent is PPoGPacket.Data) {
+                injected = true
+                receivePacket(inbound0)
+            }
+        }
+        val outboundBytes = randomBytes((mtu - 4) * 3)
+        ppStreams.outboundPPBytes.send(outboundBytes)
+
+        val chunks = outboundBytes.asList().chunked(mtu - 4).map { it.toByteArray() }
+        assertOutboundPPoGData(sequence = 0, data = chunks[0])
+        // Before this change the ACK waited until all three had been sent.
+        assertOutboundPPoGPacket(PPoGPacket.Ack(sequence = 0))
+        assertOutboundPPoGData(sequence = 1, data = chunks[1])
+        assertOutboundPPoGData(sequence = 2, data = chunks[2])
+        assertInboundPPBytes(inbound0.data)
+    }
+
+    @Test
+    fun eachPacketOfABurstIsAckedAndDeliveredInOrder() = runTest {
+        val scope = ConnectionCoroutineScope(backgroundScope.coroutineContext)
+        ppog = PPoG(ppStreams, ppogStreams, sender, bleConfigFlow, blePlatformConfig, scope)
+        ppog.run(false)
+        init()
+
+        val inbound = (0..2).map { ppogDataPacket(it) }
+        inbound.forEach { receivePacket(it) }
+        (0..2).forEach { assertOutboundPPoGPacket(PPoGPacket.Ack(sequence = it)) }
+        testScheduler.runCurrent()
+        assertTrue(outboundPPoGPackets.isEmpty)
+        inbound.forEach { assertInboundPPBytes(it.data) }
+    }
 
     @Test
     fun inboundOutOfSequenceResendAck() = runTest {

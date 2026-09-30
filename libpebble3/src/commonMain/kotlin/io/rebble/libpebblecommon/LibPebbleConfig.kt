@@ -138,6 +138,12 @@ data class BleConfig(
      */
     val centralStateRestoration: Boolean = false,
     val filterScanResultsByUuid: Boolean = true,
+    /**
+     * Upper bound on the PPoG receive window offered to the watch: the most packets it may
+     * have in flight to the phone. Null keeps the platform default. A smaller window bounds
+     * what the watch queues on its Bluetooth stack and re-sends after an ACK timeout.
+     */
+    val maxPpogRxWindow: Int? = null,
 )
 
 class BleConfigFlow(val flow: StateFlow<LibPebbleConfig>) {
